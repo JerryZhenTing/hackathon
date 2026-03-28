@@ -80,75 +80,36 @@ function StatusBadge({ state }: { state: Task["state"] }) {
   );
 }
 
-// ─── Approval Panel ───────────────────────────────────────────────────────────
-
-function ApprovalPanel({
-  task,
-  onApprove,
-  onDeny,
-}: {
-  task: Task;
-  onApprove: () => void;
-  onDeny: () => void;
-}) {
-  const ctx = task.approvalContext!;
-  const riskColor = {
-    low:    "border-sky-800 bg-sky-950",
-    medium: "border-amber-700 bg-amber-950",
-    high:   "border-red-700 bg-red-950",
-  }[ctx.risk];
-
-  return (
-    <div className={`rounded-lg border p-4 ${riskColor} mt-4`}>
-      <div className="flex items-start gap-3">
-        <span className="text-amber-400 text-xl mt-0.5">⚠</span>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-zinc-100 mb-1">
-            Approval Required
-          </p>
-          <p className="text-xs text-zinc-300 mb-1">
-            <span className="font-mono text-amber-300">{ctx.action}</span>
-          </p>
-          <p className="text-xs text-zinc-400 leading-relaxed">{ctx.description}</p>
-          <div className="flex gap-2 mt-3">
-            <button
-              onClick={onApprove}
-              className="px-4 py-1.5 text-xs font-semibold rounded bg-green-600 hover:bg-green-500 text-white transition-colors"
-            >
-              Approve
-            </button>
-            <button
-              onClick={onDeny}
-              className="px-4 py-1.5 text-xs font-semibold rounded bg-red-700 hover:bg-red-600 text-white transition-colors"
-            >
-              Deny
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Active Task Panel ─────────────────────────────────────────────────────────
 
 function ActiveTaskPanel({
   task,
   onApprove,
   onDeny,
+  onSendMessage,
 }: {
   task: Task;
-  onApprove: (id: string) => void;
-  onDeny: (id: string) => void;
+  onApprove: () => void;
+  onDeny: () => void;
+  onSendMessage: (msg: string) => void;
 }) {
   const logEndRef = useRef<HTMLDivElement>(null);
+  const [reply, setReply] = useState("");
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [task.logs.length]);
 
+  const submitReply = () => {
+    if (!reply.trim()) return;
+    onSendMessage(reply.trim());
+    setReply("");
+  };
+
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+    <div className={`rounded-xl border bg-zinc-900 p-4 ${
+      task.state === "waiting_approval" ? "border-amber-600" : "border-zinc-800"
+    }`}>
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <div>
@@ -169,10 +130,7 @@ function ActiveTaskPanel({
             <div key={i} className={`log-entry flex gap-2 mb-0.5 ${logStyle(entry.level)}`}>
               <span className="text-zinc-600 shrink-0 select-none">
                 {new Date(entry.timestamp).toLocaleTimeString("en", {
-                  hour12: false,
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
+                  hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
                 })}
               </span>
               <span className="text-zinc-500 shrink-0 select-none">{logPrefix(entry.level)}</span>
@@ -182,15 +140,6 @@ function ActiveTaskPanel({
         )}
         <div ref={logEndRef} />
       </div>
-
-      {/* Approval panel */}
-      {task.state === "waiting_approval" && task.approvalContext && (
-        <ApprovalPanel
-          task={task}
-          onApprove={() => onApprove(task.id)}
-          onDeny={() => onDeny(task.id)}
-        />
-      )}
 
       {/* Result */}
       {(task.state === "completed" || task.state === "failed" || task.state === "denied") && task.result && (
@@ -203,6 +152,46 @@ function ActiveTaskPanel({
             {task.state === "completed" ? "Result" : task.state === "denied" ? "Denied" : "Error"}
           </p>
           <pre className="whitespace-pre-wrap break-words font-mono">{task.result}</pre>
+        </div>
+      )}
+
+      {/* Approval — inline, always visible, no fixed positioning */}
+      {task.state === "waiting_approval" && task.approvalContext && (
+        <div className="mt-3 rounded-xl border-2 border-amber-500 bg-amber-950/40 p-4">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-amber-400">⚠</span>
+            <span className="text-sm font-bold text-amber-300">Approval Required</span>
+          </div>
+          <p className="text-xs font-mono text-amber-200 mb-1">{task.approvalContext.action}</p>
+          <p className="text-xs text-zinc-400 mb-3 leading-relaxed">{task.approvalContext.description}</p>
+          <div className="flex gap-3">
+            <button onClick={onApprove}
+              className="flex-1 py-3 text-sm font-bold rounded-xl bg-green-600 hover:bg-green-500 active:bg-green-700 text-white transition-colors">
+              Approve
+            </button>
+            <button onClick={onDeny}
+              className="flex-1 py-3 text-sm font-bold rounded-xl bg-red-700 hover:bg-red-600 active:bg-red-800 text-white transition-colors">
+              Deny
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Reply input — hidden during approval (use buttons only), shown otherwise */}
+      {task.state !== "denied" && task.state !== "waiting_approval" && (
+        <div className="mt-3 flex gap-2">
+          <input
+            type="text"
+            placeholder={task.state === "running" ? "Reply to agent..." : "New task..."}
+            value={reply}
+            onChange={(e) => setReply(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submitReply()}
+            className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-600"
+          />
+          <button onClick={submitReply} disabled={!reply.trim()}
+            className="px-4 py-2.5 text-sm font-semibold rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-white transition-colors">
+            {task.state === "running" ? "Send" : "Run"}
+          </button>
         </div>
       )}
     </div>
@@ -400,6 +389,15 @@ export default function Home() {
     await fetch(`/api/tasks/${id}/deny`, { method: "POST" });
   }, []);
 
+  // ── Send message to running agent ────────────────────────────────────────────
+  const handleSendMessage = useCallback(async (id: string, message: string) => {
+    await fetch(`/api/tasks/${id}/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
+  }, []);
+
   return (
     <div className="min-h-screen bg-zinc-950 flex flex-col">
       {/* ── Header ── */}
@@ -486,8 +484,20 @@ export default function Home() {
         {activeTask && (
           <ActiveTaskPanel
             task={activeTask}
-            onApprove={handleApprove}
-            onDeny={handleDeny}
+            onApprove={() => handleApprove(activeTask.id)}
+            onDeny={() => handleDeny(activeTask.id)}
+            onSendMessage={(msg) => {
+              const active = ["running", "waiting_approval"].includes(activeTask.state);
+              if (active) {
+                handleSendMessage(activeTask.id, msg);
+              } else {
+                // Task is done — submit as a new task, prepend prior context summary
+                const context = activeTask.result
+                  ? `Previous task result: ${activeTask.result.slice(0, 300)}\n\nFollow-up: ${msg}`
+                  : msg;
+                submitTask(context);
+              }
+            }}
           />
         )}
 

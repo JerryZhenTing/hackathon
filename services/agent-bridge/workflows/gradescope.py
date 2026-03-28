@@ -123,6 +123,8 @@ Follow the system instructions exactly. Do not submit until you receive explicit
             user_message=user_message,
             log_fn=log_fn,
             approval_fn=approval_fn,
+            api_fn=executor._api_fn,
+            use_computer=True,
         )
         complete_fn(task_id, result)
     except Exception as e:

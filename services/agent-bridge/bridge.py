@@ -99,6 +99,7 @@ def run_task_in_thread(task: dict):
 
     try:
         executor = get_executor()
+        executor._api_fn = api  # make api() available inside executor
 
         if task_type == "gradescope_submit":
             from workflows.gradescope import run_gradescope_submit
@@ -130,6 +131,7 @@ def run_task_in_thread(task: dict):
                 prompt=user_prompt,
                 log_fn=post_log,
                 approval_fn=request_approval,
+                api_fn=api,
             )
             complete_task(task_id, result or "Task completed.")
 

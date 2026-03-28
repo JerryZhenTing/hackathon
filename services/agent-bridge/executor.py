@@ -13,12 +13,13 @@ import time
 import json
 import subprocess
 import logging
-from typing import Callable
+from typing import Callable, Optional
 
 log = logging.getLogger("executor")
 
-LogFn = Callable[[str, str, str], None]      # (task_id, level, message)
-ApprovalFn = Callable[[str, str, str, str], bool]  # (task_id, action, description, risk) -> bool
+LogFn = Callable[[str, str, str], None]           # (task_id, level, message)
+ApprovalFn = Callable[[str, str, str, str], bool] # (task_id, action, description, risk) -> bool
+ApiFn = Callable[..., Optional[dict]]             # bridge's api() helper
 
 
 # ─── Mock Executor ────────────────────────────────────────────────────────────
@@ -71,7 +72,7 @@ class RealExecutor:
     def __init__(self):
         import anthropic
         self.client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        self.model = os.getenv("CLAUDE_MODEL", "claude-opus-4-5-20251101")
+        self.model = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
 
     def _run_agentic_loop(
         self,
@@ -80,11 +81,16 @@ class RealExecutor:
         user_message: str,
         log_fn: LogFn,
         approval_fn: ApprovalFn,
+        api_fn: Optional[ApiFn] = None,
         max_iterations: int = 30,
+        use_computer: bool = False,
     ) -> str:
         """
         Core agentic loop: sends messages to Claude, handles tool calls,
         streams logs back to the frontend.
+
+        use_computer=False: bash + text_editor only (works with claude-sonnet-4-6)
+        use_computer=True:  adds computer tool for browser/GUI (needs claude-3-7-sonnet-20250219)
         """
         import anthropic
 
@@ -92,25 +98,37 @@ class RealExecutor:
 
         tools = [
             {
-                "type": "computer_20241022",
+                "type": "bash_20250124",
+                "name": "bash",
+            },
+            {
+                "type": "text_editor_20250728",
+                "name": "str_replace_based_edit_tool",
+            },
+        ]
+
+        betas = ["computer-use-2025-01-24"]
+
+        if use_computer:
+            tools.insert(0, {
+                "type": "computer_20250124",
                 "name": "computer",
                 "display_width_px": 1920,
                 "display_height_px": 1080,
                 "display_number": 1,
-            },
-            {
-                "type": "bash_20241022",
-                "name": "bash",
-            },
-            {
-                "type": "text_editor_20241022",
-                "name": "str_replace_editor",
-            },
-        ]
+            })
 
         final_result = ""
 
         for iteration in range(max_iterations):
+            # Check if the user sent a message from the UI to inject into the conversation
+            if api_fn:
+                pending = api_fn("GET", f"/api/bridge/tasks/{task_id}/user-message")
+                if pending and pending.get("message"):
+                    user_msg = pending["message"]
+                    log_fn(task_id, "info", f"Injecting user message: {user_msg}")
+                    messages.append({"role": "user", "content": user_msg})
+
             log_fn(task_id, "info", f"Agent iteration {iteration + 1}...")
 
             response = self.client.beta.messages.create(
@@ -119,7 +137,7 @@ class RealExecutor:
                 system=system_prompt,
                 tools=tools,  # type: ignore
                 messages=messages,
-                betas=["computer-use-2024-10-22"],
+                betas=betas,
             )
 
             # Collect assistant content
@@ -220,7 +238,7 @@ class RealExecutor:
             except Exception as e:
                 return f"Error: {e}"
 
-        elif tool_name == "str_replace_editor":
+        elif tool_name == "str_replace_based_edit_tool":
             command = tool_input.get("command", "")
             path = tool_input.get("path", "")
 
@@ -314,11 +332,10 @@ class RealExecutor:
 
         return f"Unknown tool: {tool_name}"
 
-    def run_raw(self, task_id: str, prompt: str, log_fn: LogFn, approval_fn: ApprovalFn) -> str:
+    def run_raw(self, task_id: str, prompt: str, log_fn: LogFn, approval_fn: ApprovalFn, api_fn: Optional[ApiFn] = None) -> str:
         system = (
             "You are a local laptop agent. Execute the user's task step by step. "
-            "Use bash for shell commands, str_replace_editor for file edits, "
-            "and computer for browser/GUI automation. "
+            "Use bash for shell commands, str_replace_based_edit_tool for file edits. "
             "Log each step clearly. Do not take irreversible actions without approval."
         )
-        return self._run_agentic_loop(task_id, system, prompt, log_fn, approval_fn)
+        return self._run_agentic_loop(task_id, system, prompt, log_fn, approval_fn, api_fn=api_fn)

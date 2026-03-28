@@ -3,8 +3,9 @@ import type { Task, LogEntry, TaskState, ApprovalContext } from "./types";
 
 class TaskStore extends EventEmitter {
   private tasks = new Map<string, Task>();
-  // Track whether the bridge is alive
   private lastHeartbeat: number = 0;
+  // Pending user messages for the running agent (one at a time)
+  private pendingMessages = new Map<string, string>();
 
   getTask(id: string): Task | undefined {
     return this.tasks.get(id);
@@ -81,6 +82,18 @@ class TaskStore extends EventEmitter {
     task.updatedAt = new Date().toISOString();
     this.emit("taskUpdated", task);
     return task;
+  }
+
+  addUserMessage(id: string, message: string) {
+    this.pendingMessages.set(id, message);
+    this.emit("userMessage", id, message);
+  }
+
+  // Returns and clears the pending message (bridge calls this)
+  consumeUserMessage(id: string): string | null {
+    const msg = this.pendingMessages.get(id) ?? null;
+    this.pendingMessages.delete(id);
+    return msg;
   }
 
   // Get the next queued task (for bridge polling)
