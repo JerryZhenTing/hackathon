@@ -80,6 +80,117 @@ function StatusBadge({ state }: { state: Task["state"] }) {
   );
 }
 
+// ─── Screen Monitor ───────────────────────────────────────────────────────────
+
+function ScreenMonitor() {
+  const [enabled, setEnabled] = useState(false);
+  const [frame, setFrame] = useState<string | null>(null);
+  const [lastTs, setLastTs] = useState<number | null>(null);
+  const [toggling, setToggling] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startPolling = () => {
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch("/api/screen/frame");
+        const d = await r.json();
+        if (d.frame) { setFrame(d.frame); setLastTs(d.ts); }
+      } catch {}
+    }, 500);
+  };
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const toggle = async () => {
+    setToggling(true);
+    try {
+      const next = !enabled;
+      await fetch("/api/screen/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      setEnabled(next);
+      if (next) { startPolling(); } else { stopPolling(); setFrame(null); setLastTs(null); }
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  useEffect(() => () => stopPolling(), []);
+
+  const ago = lastTs ? `${((Date.now() - lastTs) / 1000).toFixed(1)}s ago` : null;
+
+  return (
+    <div className={`rounded-xl border bg-zinc-900 p-4 transition-colors ${
+      enabled ? "border-sky-800" : "border-zinc-800"
+    }`}>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className={`w-7 h-7 rounded-md flex items-center justify-center border transition-colors ${
+            enabled ? "bg-sky-950 border-sky-700" : "bg-zinc-800 border-zinc-700"
+          }`}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+              stroke={enabled ? "#38bdf8" : "#71717a"} strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
+          </div>
+          <div>
+            <p className={`text-xs font-semibold uppercase tracking-widest ${
+              enabled ? "text-zinc-100" : "text-zinc-500"
+            }`}>Screen Monitor</p>
+            {enabled && ago && (
+              <p className="text-[9px] text-zinc-600 tracking-wider">LIVE · updated {ago}</p>
+            )}
+          </div>
+        </div>
+        <button
+          onClick={toggle}
+          disabled={toggling}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors disabled:opacity-50 ${
+            enabled
+              ? "bg-red-950 border border-red-700 text-red-400 hover:bg-red-900"
+              : "bg-sky-600 hover:bg-sky-500 text-white"
+          }`}
+        >
+          {toggling ? "..." : enabled ? "Stop" : "Start"}
+        </button>
+      </div>
+
+      {/* Live frame */}
+      {enabled && (
+        <div className="mt-3 rounded-lg overflow-hidden border border-sky-900/40 bg-zinc-950"
+          style={{ aspectRatio: "16/9", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+          {frame ? (
+            <>
+              <img
+                src={`data:image/jpeg;base64,${frame}`}
+                alt="Live screen"
+                style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+              />
+              {/* Live badge */}
+              <div className="absolute top-2 right-2 flex items-center gap-1.5 bg-zinc-950/80 rounded px-1.5 py-0.5 backdrop-blur-sm">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-[9px] text-zinc-400 tracking-wider">LIVE</span>
+              </div>
+            </>
+          ) : (
+            <div className="flex flex-col items-center gap-2">
+              <div className="w-5 h-5 border-2 border-zinc-700 border-t-sky-500 rounded-full animate-spin" />
+              <p className="text-[10px] text-zinc-600 tracking-wider">Waiting for bridge…</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Active Task Panel ─────────────────────────────────────────────────────────
 
 function ActiveTaskPanel({
@@ -479,6 +590,9 @@ export default function Home() {
             on your laptop to connect.
           </div>
         )}
+
+        {/* Screen monitor */}
+        <ScreenMonitor />
 
         {/* Active task */}
         {activeTask && (

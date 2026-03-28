@@ -211,11 +211,15 @@ class RealExecutor:
 
         if tool_name == "bash":
             cmd = tool_input.get("command", "")
-            # Flag destructive commands for approval
-            dangerous = any(
-                kw in cmd
-                for kw in ["rm -rf", "sudo", "mkfs", "dd ", "> /dev/", "git push", "git commit"]
-            )
+
+            # Hard block — never execute these regardless of approval
+            blocked = any(kw in cmd for kw in ["sudo", "mkfs", "dd ", "> /dev/"])
+            if blocked:
+                log_fn(task_id, "warn", f"Blocked disallowed command: {cmd[:80]}")
+                return f"Error: command not allowed (contains restricted keyword). Do not use sudo or system-level commands."
+
+            # Soft block — ask for approval before running
+            dangerous = any(kw in cmd for kw in ["rm -rf", "git push", "git commit"])
             if dangerous:
                 approved = approval_fn(
                     task_id,
@@ -336,6 +340,9 @@ class RealExecutor:
         system = (
             "You are a local laptop agent. Execute the user's task step by step. "
             "Use bash for shell commands, str_replace_based_edit_tool for file edits. "
-            "Log each step clearly. Do not take irreversible actions without approval."
+            "Log each step clearly. Do not take irreversible actions without approval. "
+            "NEVER use sudo or any command requiring elevated privileges. "
+            "NEVER use interactive commands that wait for input (apt install -y is fine, but never plain apt install). "
+            "Work only within the user's home directory unless told otherwise."
         )
         return self._run_agentic_loop(task_id, system, prompt, log_fn, approval_fn, api_fn=api_fn)

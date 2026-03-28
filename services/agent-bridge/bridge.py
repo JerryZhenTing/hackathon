@@ -11,6 +11,8 @@ import sys
 import time
 import logging
 import threading
+import base64
+import io
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -149,6 +151,59 @@ def heartbeat_loop():
         time.sleep(5)
 
 
+SCREEN_CAPTURE_INTERVAL = 0.5  # ~2 FPS
+
+def _capture_frame_bytes():
+    """Capture the primary display and return JPEG bytes."""
+    try:
+        import mss
+        from PIL import Image
+        with mss.mss() as sct:
+            monitor = sct.monitors[1]
+            img = sct.grab(monitor)
+            pil = Image.frombytes("RGB", img.size, img.bgra, "raw", "BGRX")
+            buf = io.BytesIO()
+            pil.save(buf, format="JPEG", quality=40, optimize=True)
+            return buf.getvalue()
+    except ImportError:
+        pass
+    try:
+        from PIL import ImageGrab
+        img = ImageGrab.grab()
+        img = img.resize((img.width // 2, img.height // 2))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=40, optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        log.warning("Screen capture failed: %s", e)
+        return None
+
+
+def screen_capture_loop():
+    """Poll screen-status and stream frames to backend when enabled."""
+    was_enabled = False
+    while True:
+        try:
+            status = api("GET", "/api/bridge/screen/status")
+            enabled = status.get("enabled", False) if status else False
+
+            if enabled != was_enabled:
+                log.info("Screen streaming %s", "enabled" if enabled else "disabled")
+                was_enabled = enabled
+
+            if enabled:
+                frame_bytes = _capture_frame_bytes()
+                if frame_bytes:
+                    b64 = base64.b64encode(frame_bytes).decode("utf-8")
+                    api("POST", "/api/bridge/screen/frame", json={"frame": b64}, timeout=5)
+                time.sleep(SCREEN_CAPTURE_INTERVAL)
+            else:
+                time.sleep(2)
+        except Exception as e:
+            log.warning("Screen capture loop error: %s", e)
+            time.sleep(2)
+
+
 def main():
     mode = "MOCK" if USE_MOCK else "REAL (Claude API)"
     log.info("Bridge starting — backend=%s mode=%s", BACKEND_URL, mode)
@@ -160,6 +215,10 @@ def main():
     # Start heartbeat thread
     t = threading.Thread(target=heartbeat_loop, daemon=True)
     t.start()
+
+    # Start screen capture thread
+    sc = threading.Thread(target=screen_capture_loop, daemon=True)
+    sc.start()
 
     log.info("Polling for tasks every %ds...", POLL_INTERVAL)
 

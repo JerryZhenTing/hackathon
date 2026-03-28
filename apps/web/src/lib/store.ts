@@ -6,6 +6,10 @@ class TaskStore extends EventEmitter {
   private lastHeartbeat: number = 0;
   // Pending user messages for the running agent (one at a time)
   private pendingMessages = new Map<string, string>();
+  // Screen streaming
+  screenEnabled: boolean = false;
+  latestFrame: string | null = null;
+  frameTimestamp: number = 0;
 
   getTask(id: string): Task | undefined {
     return this.tasks.get(id);
@@ -110,6 +114,18 @@ class TaskStore extends EventEmitter {
   isBridgeOnline(): boolean {
     // Consider bridge online if heartbeat within last 10 seconds
     return Date.now() - this.lastHeartbeat < 10_000;
+  }
+
+  setScreenEnabled(enabled: boolean) {
+    this.screenEnabled = enabled;
+    if (!enabled) this.latestFrame = null;
+    this.emit("screenToggled", enabled);
+  }
+
+  setFrame(base64: string) {
+    this.latestFrame = base64;
+    this.frameTimestamp = Date.now();
+    this.emit("newFrame");
   }
 }
 
