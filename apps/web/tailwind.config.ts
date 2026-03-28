@@ -6,15 +6,12 @@ const config: Config = {
     "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
   ],
+  // Mantine handles the CSS reset; disable Tailwind's preflight to avoid conflicts
+  corePlugins: {
+    preflight: false,
+  },
   theme: {
-    extend: {
-      fontFamily: {
-        mono: ["var(--font-mono)", "ui-monospace", "monospace"],
-      },
-      animation: {
-        "pulse-slow": "pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",
-      },
-    },
+    extend: {},
   },
   plugins: [],
 };

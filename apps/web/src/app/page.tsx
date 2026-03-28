@@ -1,18 +1,48 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  AppShell,
+  Badge,
+  Button,
+  Group,
+  Stack,
+  Text,
+  Textarea,
+  TextInput,
+  Paper,
+  Box,
+  Modal,
+  Alert,
+  Code,
+  Flex,
+  Tabs,
+  ActionIcon,
+  Divider,
+  CloseButton,
+  Tooltip,
+} from "@mantine/core";
+import { useDisclosure } from "@mantine/hooks";
+import { notifications } from "@mantine/notifications";
 import type { Task, TaskType, LogEntry } from "@/lib/types";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface QuickAction {
+  id?: string; // present on custom actions
   label: string;
   type: TaskType;
   prompt: string;
   fields: { key: string; label: string; placeholder: string }[];
 }
 
-const QUICK_ACTIONS: QuickAction[] = [
+interface ActiveFormState {
+  action: QuickAction;
+  isClarification: boolean;
+  originalPrompt?: string;
+}
+
+const BUILT_IN_ACTIONS: QuickAction[] = [
   {
     label: "Submit Gradescope",
     type: "gradescope_submit",
@@ -36,182 +66,588 @@ const QUICK_ACTIONS: QuickAction[] = [
   },
 ];
 
-// ─── Log level styling ────────────────────────────────────────────────────────
+// ─── Clarification logic ──────────────────────────────────────────────────────
 
-function logStyle(level: LogEntry["level"]) {
+function suggestClarification(prompt: string): QuickAction | null {
+  const lower = prompt.toLowerCase().trim();
+  const words = lower.split(/\s+/).filter(Boolean);
+
+  if (
+    lower.includes("gradescope") ||
+    (lower.includes("submit") &&
+      (lower.includes("assignment") ||
+        lower.includes("homework") ||
+        /hw\d/i.test(lower)))
+  ) {
+    return BUILT_IN_ACTIONS[0];
+  }
+
+  if (
+    (lower.includes("edit") ||
+      lower.includes("fix") ||
+      lower.includes("change") ||
+      lower.includes("refactor") ||
+      lower.includes("debug")) &&
+    (lower.includes("code") ||
+      lower.includes("file") ||
+      lower.includes("bug") ||
+      /\.(py|js|ts|tsx|jsx|java|go|rs|cpp|c)\b/.test(lower))
+  ) {
+    return BUILT_IN_ACTIONS[1];
+  }
+
+  if (words.length < 5) {
+    return {
+      label: "Clarify your request",
+      type: "raw",
+      prompt,
+      fields: [
+        {
+          key: "details",
+          label: "What exactly should happen?",
+          placeholder: "Be specific — what app, file, or website is involved?",
+        },
+        {
+          key: "context",
+          label: "Additional context (optional)",
+          placeholder: "File paths, URLs, credentials location…",
+        },
+      ],
+    };
+  }
+
+  return null;
+}
+
+// ─── Log helpers ──────────────────────────────────────────────────────────────
+
+function logColor(level: LogEntry["level"]) {
   switch (level) {
-    case "info":    return "text-zinc-400";
-    case "step":    return "text-sky-400";
-    case "action":  return "text-violet-400";
-    case "warn":    return "text-amber-400";
-    case "error":   return "text-red-400";
-    default:        return "text-zinc-400";
+    case "info":   return "#71717a";
+    case "step":   return "#38bdf8";
+    case "action": return "#a78bfa";
+    case "warn":   return "#fbbf24";
+    case "error":  return "#f87171";
+    default:       return "#71717a";
   }
 }
 
 function logPrefix(level: LogEntry["level"]) {
   switch (level) {
-    case "info":    return "INFO  ";
-    case "step":    return "STEP  ";
-    case "action":  return "ACT   ";
-    case "warn":    return "WARN  ";
-    case "error":   return "ERROR ";
-    default:        return "      ";
+    case "info":   return "INFO ";
+    case "step":   return "STEP ";
+    case "action": return "ACT  ";
+    case "warn":   return "WARN ";
+    case "error":  return "ERR  ";
+    default:       return "     ";
   }
 }
 
-// ─── Status badge ─────────────────────────────────────────────────────────────
+// ─── StatusBadge ─────────────────────────────────────────────────────────────
 
 function StatusBadge({ state }: { state: Task["state"] }) {
-  const configs: Record<Task["state"], { dot: string; text: string; label: string }> = {
-    queued:           { dot: "bg-zinc-500",  text: "text-zinc-400",  label: "Queued" },
-    running:          { dot: "bg-sky-500 animate-pulse", text: "text-sky-400", label: "Running" },
-    waiting_approval: { dot: "bg-amber-500 animate-pulse", text: "text-amber-400", label: "Needs Approval" },
-    completed:        { dot: "bg-green-500", text: "text-green-400", label: "Completed" },
-    failed:           { dot: "bg-red-500",   text: "text-red-400",   label: "Failed" },
-    denied:           { dot: "bg-red-400",   text: "text-red-300",   label: "Denied" },
+  const map: Record<Task["state"], { color: string; label: string }> = {
+    queued:           { color: "gray",   label: "Queued" },
+    running:          { color: "blue",   label: "Running" },
+    waiting_approval: { color: "yellow", label: "Approval" },
+    completed:        { color: "green",  label: "Done" },
+    failed:           { color: "red",    label: "Failed" },
+    denied:           { color: "orange", label: "Denied" },
   };
-  const c = configs[state];
+  const { color, label } = map[state];
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${c.text}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
-      {c.label}
-    </span>
+    <Badge color={color} variant="dot" size="sm" tt="none" fw={500}>
+      {label}
+    </Badge>
   );
 }
 
-// ─── Approval Panel ───────────────────────────────────────────────────────────
+// ─── InlineActionForm ─────────────────────────────────────────────────────────
 
-function ApprovalPanel({
+function InlineActionForm({
+  form,
+  submitting,
+  onSubmit,
+  onBack,
+  onSkip,
+}: {
+  form: ActiveFormState;
+  submitting: boolean;
+  onSubmit: (prompt: string, type: TaskType, params: Record<string, string>) => void;
+  onBack: () => void;
+  onSkip?: () => void;
+}) {
+  const { action, isClarification, originalPrompt } = form;
+  const [params, setParams] = useState<Record<string, string>>({});
+
+  const handleSubmit = () => {
+    if (isClarification) {
+      const extras = Object.entries(params)
+        .filter(([, v]) => v.trim())
+        .map(([k, v]) => `${k}: ${v}`)
+        .join("; ");
+      const full = extras ? `${originalPrompt}\n\n${extras}` : originalPrompt!;
+      onSubmit(full, "raw", params);
+    } else {
+      const promptStr = `${action.prompt}: ${Object.entries(params)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ")}`;
+      onSubmit(promptStr, action.type, params);
+    }
+  };
+
+  const inputStyles = {
+    label: {
+      color: "var(--mantine-color-dark-2)",
+      fontSize: "0.73rem",
+      marginBottom: 4,
+      fontWeight: 500,
+      letterSpacing: "0.02em",
+    },
+    input: {
+      background: "var(--mantine-color-dark-9)",
+      border: "1px solid var(--mantine-color-dark-5)",
+      color: "var(--mantine-color-gray-1)",
+      fontFamily: "var(--mantine-font-family-monospace)",
+      fontSize: "0.8rem",
+    },
+  };
+
+  return (
+    <Stack gap="sm">
+      {/* Form header */}
+      <Group justify="space-between" align="center">
+        <Button
+          variant="subtle"
+          size="xs"
+          c="dimmed"
+          leftSection={<span style={{ fontSize: 10 }}>←</span>}
+          onClick={onBack}
+          styles={{ root: { padding: "0 6px", height: 24 } }}
+        >
+          Back
+        </Button>
+        <Group gap="xs">
+          {isClarification && (
+            <Badge color="yellow" variant="light" size="sm" tt="none">
+              Needs more info
+            </Badge>
+          )}
+          <Text size="xs" c="gray.3" fw={500}>
+            {action.label}
+          </Text>
+        </Group>
+      </Group>
+
+      <Divider color="dark.6" />
+
+      {/* Fields */}
+      {action.fields.map((f) => (
+        <TextInput
+          key={f.key}
+          label={f.label}
+          placeholder={f.placeholder}
+          size="sm"
+          value={params[f.key] || ""}
+          onChange={(e) => setParams((p) => ({ ...p, [f.key]: e.target.value }))}
+          styles={inputStyles}
+        />
+      ))}
+
+      {/* Actions */}
+      <Group justify="flex-end" gap="xs" mt={4}>
+        {onSkip && (
+          <Button
+            variant="subtle"
+            size="sm"
+            c="dimmed"
+            onClick={onSkip}
+            styles={{ root: { fontSize: "0.75rem" } }}
+          >
+            Run as-is
+          </Button>
+        )}
+        <Button
+          size="sm"
+          fw={600}
+          loading={submitting}
+          onClick={handleSubmit}
+          rightSection={<span style={{ fontSize: "0.7rem", opacity: 0.6 }}>⌘↵</span>}
+          styles={{ root: { paddingRight: 10 } }}
+        >
+          Run Task
+        </Button>
+      </Group>
+    </Stack>
+  );
+}
+
+// ─── AddActionModal ───────────────────────────────────────────────────────────
+
+function AddActionModal({
+  opened,
+  onClose,
+  onAdd,
+}: {
+  opened: boolean;
+  onClose: () => void;
+  onAdd: (action: QuickAction) => void;
+}) {
+  const [label, setLabel] = useState("");
+  const [fields, setFields] = useState([{ label: "", placeholder: "" }]);
+
+  const reset = () => {
+    setLabel("");
+    setFields([{ label: "", placeholder: "" }]);
+  };
+
+  const handleClose = () => {
+    reset();
+    onClose();
+  };
+
+  const updateField = (i: number, key: "label" | "placeholder", val: string) =>
+    setFields((prev) => prev.map((f, j) => (j === i ? { ...f, [key]: val } : f)));
+
+  const handleSave = () => {
+    if (!label.trim()) return;
+    onAdd({
+      id: `custom-${Date.now()}`,
+      label: label.trim(),
+      type: "raw",
+      prompt: label.trim(),
+      fields: fields
+        .filter((f) => f.label.trim())
+        .map((f) => ({
+          key: f.label.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, ""),
+          label: f.label.trim(),
+          placeholder: f.placeholder.trim(),
+        })),
+    });
+    handleClose();
+  };
+
+  const inputStyles = {
+    label: { color: "var(--mantine-color-dark-2)", fontSize: "0.73rem", marginBottom: 3 },
+    input: {
+      background: "var(--mantine-color-dark-9)",
+      border: "1px solid var(--mantine-color-dark-5)",
+      color: "var(--mantine-color-gray-1)",
+      fontSize: "0.82rem",
+    },
+  };
+
+  return (
+    <Modal
+      opened={opened}
+      onClose={handleClose}
+      title={<Text size="sm" fw={600} c="gray.1">New Quick Action</Text>}
+      size="sm"
+      overlayProps={{ backgroundOpacity: 0.65, blur: 4 }}
+      styles={{
+        content: {
+          background: "var(--mantine-color-dark-8)",
+          border: "1px solid var(--mantine-color-dark-5)",
+        },
+        header: { background: "var(--mantine-color-dark-8)", paddingBottom: 8 },
+      }}
+    >
+      <Stack gap="sm">
+        <TextInput
+          label="Action name"
+          placeholder="e.g. Send Email, Run Script…"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          size="sm"
+          styles={inputStyles}
+        />
+
+        <Box>
+          <Text size="xs" c="dimmed" fw={500} tt="uppercase" mb="xs" style={{ letterSpacing: "0.06em" }}>
+            Fields
+          </Text>
+          <Stack gap={6}>
+            {fields.map((f, i) => (
+              <Group key={i} gap={6} align="flex-end" wrap="nowrap">
+                <TextInput
+                  label={i === 0 ? "Field label" : undefined}
+                  placeholder="e.g. File path"
+                  flex={1}
+                  size="xs"
+                  value={f.label}
+                  onChange={(e) => updateField(i, "label", e.target.value)}
+                  styles={inputStyles}
+                />
+                <TextInput
+                  label={i === 0 ? "Placeholder" : undefined}
+                  placeholder="e.g. /home/user/…"
+                  flex={1}
+                  size="xs"
+                  value={f.placeholder}
+                  onChange={(e) => updateField(i, "placeholder", e.target.value)}
+                  styles={inputStyles}
+                />
+                {fields.length > 1 && (
+                  <CloseButton
+                    size="sm"
+                    mb={i === 0 ? 0 : undefined}
+                    onClick={() => setFields((prev) => prev.filter((_, j) => j !== i))}
+                    style={{ flexShrink: 0, color: "var(--mantine-color-dark-3)" }}
+                  />
+                )}
+              </Group>
+            ))}
+          </Stack>
+          <Button
+            variant="subtle"
+            size="xs"
+            c="dimmed"
+            mt="xs"
+            onClick={() => setFields((prev) => [...prev, { label: "", placeholder: "" }])}
+          >
+            + Add field
+          </Button>
+        </Box>
+
+        <Divider color="dark.6" />
+
+        <Group justify="flex-end" gap="xs">
+          <Button variant="subtle" size="sm" c="dimmed" onClick={handleClose}>
+            Cancel
+          </Button>
+          <Button size="sm" fw={600} disabled={!label.trim()} onClick={handleSave}>
+            Save Action
+          </Button>
+        </Group>
+      </Stack>
+    </Modal>
+  );
+}
+
+// ─── ApprovalModal ────────────────────────────────────────────────────────────
+
+function ApprovalModal({
   task,
+  opened,
   onApprove,
   onDeny,
 }: {
-  task: Task;
+  task: Task | null;
+  opened: boolean;
   onApprove: () => void;
   onDeny: () => void;
 }) {
-  const ctx = task.approvalContext!;
-  const riskColor = {
-    low:    "border-sky-800 bg-sky-950",
-    medium: "border-amber-700 bg-amber-950",
-    high:   "border-red-700 bg-red-950",
-  }[ctx.risk];
+  if (!task?.approvalContext) return null;
+  const ctx = task.approvalContext;
+  const riskColor = { low: "blue", medium: "yellow", high: "red" }[ctx.risk];
 
   return (
-    <div className={`rounded-lg border p-4 ${riskColor} mt-4`}>
-      <div className="flex items-start gap-3">
-        <span className="text-amber-400 text-xl mt-0.5">⚠</span>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-zinc-100 mb-1">
-            Approval Required
-          </p>
-          <p className="text-xs text-zinc-300 mb-1">
-            <span className="font-mono text-amber-300">{ctx.action}</span>
-          </p>
-          <p className="text-xs text-zinc-400 leading-relaxed">{ctx.description}</p>
-          <div className="flex gap-2 mt-3">
-            <button
-              onClick={onApprove}
-              className="px-4 py-1.5 text-xs font-semibold rounded bg-green-600 hover:bg-green-500 text-white transition-colors"
-            >
-              Approve
-            </button>
-            <button
-              onClick={onDeny}
-              className="px-4 py-1.5 text-xs font-semibold rounded bg-red-700 hover:bg-red-600 text-white transition-colors"
-            >
-              Deny
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <Modal
+      opened={opened}
+      onClose={onDeny}
+      title={
+        <Group gap="xs">
+          <Text size="sm" fw={600} c="gray.1">Approval Required</Text>
+          <Badge color={riskColor} size="xs" variant="filled" tt="none">
+            {ctx.risk} risk
+          </Badge>
+        </Group>
+      }
+      size="sm"
+      closeOnClickOutside={false}
+      closeOnEscape={false}
+      withCloseButton={false}
+      overlayProps={{ backgroundOpacity: 0.7, blur: 6 }}
+      styles={{
+        content: {
+          background: "var(--mantine-color-dark-8)",
+          border: "1px solid var(--mantine-color-dark-5)",
+        },
+        header: { background: "var(--mantine-color-dark-8)", paddingBottom: 8 },
+      }}
+    >
+      <Stack gap="md">
+        <Box>
+          <Text size="xs" c="dimmed" mb={6} fw={500} tt="uppercase" style={{ letterSpacing: "0.06em" }}>
+            Action
+          </Text>
+          <Code
+            block
+            style={{
+              background: "var(--mantine-color-dark-9)",
+              border: "1px solid var(--mantine-color-dark-6)",
+              fontSize: "0.78rem",
+              color: "var(--mantine-color-gray-2)",
+            }}
+          >
+            {ctx.action}
+          </Code>
+        </Box>
+        <Text size="sm" c="dimmed" lh={1.6}>{ctx.description}</Text>
+        <Group grow mt={4}>
+          <Button color="green" size="sm" fw={600} onClick={onApprove}>Approve</Button>
+          <Button color="red" variant="outline" size="sm" fw={600} onClick={onDeny}>Deny</Button>
+        </Group>
+      </Stack>
+    </Modal>
   );
 }
 
-// ─── Active Task Panel ─────────────────────────────────────────────────────────
+// ─── LogViewer ────────────────────────────────────────────────────────────────
 
-function ActiveTaskPanel({
-  task,
-  onApprove,
-  onDeny,
-}: {
-  task: Task;
-  onApprove: (id: string) => void;
-  onDeny: (id: string) => void;
-}) {
+function LogViewer({ logs }: { logs: LogEntry[] }) {
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [task.logs.length]);
+  }, [logs.length]);
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <div>
-          <span className="text-xs text-zinc-500 uppercase tracking-wider">
-            {task.type.replace(/_/g, " ")}
-          </span>
-          <p className="text-sm text-zinc-200 mt-0.5 line-clamp-1">{task.userPrompt}</p>
-        </div>
-        <StatusBadge state={task.state} />
-      </div>
-
-      {/* Live log */}
-      <div className="bg-zinc-950 rounded-lg p-3 h-56 overflow-y-auto text-xs font-mono border border-zinc-800">
-        {task.logs.length === 0 ? (
-          <p className="text-zinc-600">Waiting for execution to start...</p>
-        ) : (
-          task.logs.map((entry, i) => (
-            <div key={i} className={`log-entry flex gap-2 mb-0.5 ${logStyle(entry.level)}`}>
-              <span className="text-zinc-600 shrink-0 select-none">
-                {new Date(entry.timestamp).toLocaleTimeString("en", {
-                  hour12: false,
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
-                })}
-              </span>
-              <span className="text-zinc-500 shrink-0 select-none">{logPrefix(entry.level)}</span>
-              <span className="break-all">{entry.message}</span>
-            </div>
-          ))
-        )}
-        <div ref={logEndRef} />
-      </div>
-
-      {/* Approval panel */}
-      {task.state === "waiting_approval" && task.approvalContext && (
-        <ApprovalPanel
-          task={task}
-          onApprove={() => onApprove(task.id)}
-          onDeny={() => onDeny(task.id)}
-        />
+    <Box
+      style={{
+        background: "#050507",
+        borderRadius: 8,
+        border: "1px solid #1c1c20",
+        height: 216,
+        overflowY: "auto",
+        padding: "10px 12px",
+        fontFamily: "var(--mantine-font-family-monospace)",
+        fontSize: "0.71rem",
+        lineHeight: 1.65,
+      }}
+    >
+      {logs.length === 0 ? (
+        <Text size="xs" c="dark.4" style={{ fontFamily: "inherit" }}>
+          Waiting for execution to start…
+        </Text>
+      ) : (
+        logs.map((entry, i) => (
+          <div
+            key={i}
+            className="log-entry"
+            style={{ display: "flex", gap: 10, marginBottom: 1 }}
+          >
+            <span style={{ color: "#3f3f46", flexShrink: 0, userSelect: "none" }}>
+              {new Date(entry.timestamp).toLocaleTimeString("en", {
+                hour12: false,
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })}
+            </span>
+            <span style={{ color: "#52525b", flexShrink: 0, userSelect: "none" }}>
+              {logPrefix(entry.level)}
+            </span>
+            <span style={{ color: logColor(entry.level), wordBreak: "break-all" }}>
+              {entry.message}
+            </span>
+          </div>
+        ))
       )}
-
-      {/* Result */}
-      {(task.state === "completed" || task.state === "failed" || task.state === "denied") && task.result && (
-        <div className={`mt-3 rounded-lg border p-3 text-xs ${
-          task.state === "completed"
-            ? "border-green-800 bg-green-950 text-green-300"
-            : "border-red-800 bg-red-950 text-red-300"
-        }`}>
-          <p className="font-semibold mb-1">
-            {task.state === "completed" ? "Result" : task.state === "denied" ? "Denied" : "Error"}
-          </p>
-          <pre className="whitespace-pre-wrap break-words font-mono">{task.result}</pre>
-        </div>
-      )}
-    </div>
+      <div ref={logEndRef} />
+    </Box>
   );
 }
 
-// ─── Task History ─────────────────────────────────────────────────────────────
+// ─── ActiveTaskPanel ──────────────────────────────────────────────────────────
 
-function TaskHistory({
+function ActiveTaskPanel({
+  task,
+  onOpenApproval,
+}: {
+  task: Task;
+  onOpenApproval: () => void;
+}) {
+  const hasResult =
+    (task.state === "completed" || task.state === "failed" || task.state === "denied") &&
+    task.result;
+
+  return (
+    <Paper
+      p="md"
+      radius="md"
+      style={{
+        background: "rgba(24, 24, 27, 0.9)",
+        border: "1px solid #27272a",
+        boxShadow: "0 0 0 1px rgba(56,189,248,0.05), 0 8px 32px rgba(0,0,0,0.4)",
+        backdropFilter: "blur(12px)",
+      }}
+    >
+      <Group justify="space-between" mb="sm" align="flex-start" wrap="nowrap">
+        <Box style={{ minWidth: 0, flex: 1 }}>
+          <Text
+            size="xs"
+            c="dimmed"
+            tt="uppercase"
+            fw={500}
+            mb={2}
+            style={{ letterSpacing: "0.06em" }}
+          >
+            {task.type.replace(/_/g, " ")}
+          </Text>
+          <Text
+            size="sm"
+            c="gray.2"
+            style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {task.userPrompt}
+          </Text>
+        </Box>
+        <Group gap="xs" style={{ flexShrink: 0 }}>
+          <StatusBadge state={task.state} />
+          {task.state === "waiting_approval" && (
+            <Button size="xs" color="yellow" variant="filled" fw={600} onClick={onOpenApproval}>
+              Review
+            </Button>
+          )}
+        </Group>
+      </Group>
+
+      {hasResult ? (
+        <Tabs defaultValue="logs" variant="pills">
+          <Tabs.List mb="sm" style={{ gap: 4 }}>
+            <Tabs.Tab value="logs">Logs</Tabs.Tab>
+            <Tabs.Tab value="result">Result</Tabs.Tab>
+          </Tabs.List>
+          <Tabs.Panel value="logs">
+            <LogViewer logs={task.logs} />
+          </Tabs.Panel>
+          <Tabs.Panel value="result">
+            <Box
+              style={{
+                background: task.state === "completed" ? "#0c1a12" : "#1a0c0c",
+                borderRadius: 8,
+                border: `1px solid ${task.state === "completed" ? "#163826" : "#381616"}`,
+                padding: "10px 12px",
+                maxHeight: 216,
+                overflowY: "auto",
+              }}
+            >
+              <Text
+                size="xs"
+                style={{
+                  color: task.state === "completed" ? "#4ade80" : "#f87171",
+                  fontFamily: "var(--mantine-font-family-monospace)",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  lineHeight: 1.65,
+                }}
+              >
+                {task.result}
+              </Text>
+            </Box>
+          </Tabs.Panel>
+        </Tabs>
+      ) : (
+        <LogViewer logs={task.logs} />
+      )}
+    </Paper>
+  );
+}
+
+// ─── TaskHistoryList ──────────────────────────────────────────────────────────
+
+function TaskHistoryList({
   tasks,
   activeId,
   onSelect,
@@ -223,102 +659,156 @@ function TaskHistory({
   if (tasks.length === 0) return null;
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-      <p className="text-xs text-zinc-500 uppercase tracking-wider mb-3">History</p>
-      <div className="space-y-1">
-        {tasks.map((t) => (
-          <button
+    <Box>
+      <Text
+        size="xs"
+        c="dimmed"
+        tt="uppercase"
+        fw={500}
+        mb="xs"
+        style={{ letterSpacing: "0.1em", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10 }}
+      >
+        History
+      </Text>
+      <Paper
+        radius="md"
+        style={{
+          background: "rgba(24, 24, 27, 0.9)",
+          border: "1px solid #27272a",
+          boxShadow: "0 0 0 1px rgba(56,189,248,0.05), 0 8px 32px rgba(0,0,0,0.4)",
+          backdropFilter: "blur(12px)",
+          overflow: "hidden",
+        }}
+      >
+        {tasks.map((t, i) => (
+          <Box
             key={t.id}
             onClick={() => onSelect(t.id)}
-            className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors ${
-              t.id === activeId
-                ? "bg-zinc-700 text-zinc-100"
-                : "hover:bg-zinc-800 text-zinc-400"
-            }`}
+            style={{
+              padding: "10px 14px",
+              cursor: "pointer",
+              background: t.id === activeId ? "var(--mantine-color-dark-7)" : "transparent",
+              borderBottom:
+                i < tasks.length - 1 ? "1px solid var(--mantine-color-dark-7)" : undefined,
+              transition: "background 0.1s ease",
+            }}
+            onMouseEnter={(e) => {
+              if (t.id !== activeId)
+                (e.currentTarget as HTMLDivElement).style.background =
+                  "rgba(39,39,42,0.5)";
+            }}
+            onMouseLeave={(e) => {
+              if (t.id !== activeId)
+                (e.currentTarget as HTMLDivElement).style.background = "transparent";
+            }}
           >
-            <div className="flex items-center justify-between gap-2">
-              <span className="truncate">{t.userPrompt}</span>
+            <Group justify="space-between" wrap="nowrap">
+              <Text
+                size="xs"
+                c="gray.3"
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  flex: 1,
+                }}
+              >
+                {t.userPrompt}
+              </Text>
               <StatusBadge state={t.state} />
-            </div>
-          </button>
+            </Group>
+            <Text size="xs" c="dimmed" mt={2} style={{ fontSize: "0.68rem" }}>
+              {new Date(t.createdAt).toLocaleTimeString()}
+            </Text>
+          </Box>
         ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── Quick Action Form ─────────────────────────────────────────────────────────
-
-function QuickActionForm({
-  action,
-  onSubmit,
-  onCancel,
-}: {
-  action: QuickAction;
-  onSubmit: (prompt: string, type: TaskType, params: Record<string, string>) => void;
-  onCancel: () => void;
-}) {
-  const [params, setParams] = useState<Record<string, string>>({});
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const prompt = `${action.prompt}: ${Object.entries(params)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(", ")}`;
-    onSubmit(prompt, action.type, params);
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="space-y-3">
-      <p className="text-xs text-zinc-400 font-semibold uppercase tracking-wider">
-        {action.label}
-      </p>
-      {action.fields.map((f) => (
-        <div key={f.key}>
-          <label className="block text-xs text-zinc-500 mb-1">{f.label}</label>
-          <input
-            type="text"
-            placeholder={f.placeholder}
-            value={params[f.key] || ""}
-            onChange={(e) =>
-              setParams((p) => ({ ...p, [f.key]: e.target.value }))
-            }
-            className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-600 focus:ring-1 focus:ring-sky-600/30"
-          />
-        </div>
-      ))}
-      <div className="flex gap-2">
-        <button
-          type="submit"
-          className="flex-1 py-2 text-sm font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 text-white transition-colors"
-        >
-          Run Task
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 text-sm rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
-        >
-          Cancel
-        </button>
-      </div>
-    </form>
+      </Paper>
+    </Box>
   );
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
+
+const STORAGE_KEY = "remotely-custom-actions";
 
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [bridgeOnline, setBridgeOnline] = useState(false);
   const [freeText, setFreeText] = useState("");
-  const [selectedAction, setSelectedAction] = useState<QuickAction | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const activeTask = tasks.find((t) => t.id === activeTaskId) ?? null;
+  // Inline form state (examples + clarification)
+  const [activeForm, setActiveForm] = useState<ActiveFormState | null>(null);
 
-  // ── Poll bridge status ───────────────────────────────────────────────────────
+  // Custom actions (persisted)
+  const [customActions, setCustomActions] = useState<QuickAction[]>([]);
+
+  // Modals
+  const [approvalOpen, { open: openApproval, close: closeApproval }] = useDisclosure(false);
+  const [addActionOpen, { open: openAddAction, close: closeAddAction }] = useDisclosure(false);
+
+  const activeTask = tasks.find((t) => t.id === activeTaskId) ?? null;
+  const allExamples = [...BUILT_IN_ACTIONS, ...customActions];
+
+  // ── Load custom actions from localStorage ─────────────────────────────────
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) setCustomActions(JSON.parse(saved));
+    } catch {}
+  }, []);
+
+  const saveCustomActions = (actions: QuickAction[]) => {
+    setCustomActions(actions);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(actions));
+    } catch {}
+  };
+
+  const handleAddAction = (action: QuickAction) => {
+    saveCustomActions([...customActions, action]);
+  };
+
+  const handleDeleteAction = (id: string) => {
+    saveCustomActions(customActions.filter((a) => a.id !== id));
+  };
+
+  // ── State-transition effects ──────────────────────────────────────────────
+  const prevActiveRef = useRef<Task | null>(null);
+
+  useEffect(() => {
+    const prev = prevActiveRef.current;
+    prevActiveRef.current = activeTask;
+    if (!activeTask) return;
+
+    const prevState = prev?.id === activeTask.id ? prev.state : null;
+
+    if (activeTask.state === "waiting_approval" && prevState !== "waiting_approval") {
+      openApproval();
+    }
+    if (activeTask.state !== "waiting_approval" && prevState === "waiting_approval") {
+      closeApproval();
+    }
+    if (activeTask.state === "completed" && prevState === "running") {
+      notifications.show({
+        title: "Task completed",
+        message: activeTask.userPrompt.slice(0, 80),
+        color: "green",
+        autoClose: 4000,
+      });
+    }
+    if (activeTask.state === "failed" && prevState === "running") {
+      notifications.show({
+        title: "Task failed",
+        message: activeTask.result?.slice(0, 80) || "Something went wrong",
+        color: "red",
+        autoClose: 5000,
+      });
+    }
+  }, [activeTask?.state, activeTask?.id]); // eslint-disable-line
+
+  // ── Bridge heartbeat ──────────────────────────────────────────────────────
   useEffect(() => {
     const check = async () => {
       try {
@@ -334,7 +824,7 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
-  // ── Load initial task list ───────────────────────────────────────────────────
+  // ── Initial task list ─────────────────────────────────────────────────────
   useEffect(() => {
     fetch("/api/tasks")
       .then((r) => r.json())
@@ -342,12 +832,10 @@ export default function Home() {
       .catch(() => {});
   }, []);
 
-  // ── Stream updates for the active task ──────────────────────────────────────
+  // ── SSE stream for active task ────────────────────────────────────────────
   useEffect(() => {
     if (!activeTaskId) return;
-
     const es = new EventSource(`/api/tasks/${activeTaskId}/stream`);
-
     es.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === "snapshot") {
@@ -359,13 +847,11 @@ export default function Home() {
         );
       }
     };
-
     es.onerror = () => es.close();
-
     return () => es.close();
   }, [activeTaskId]);
 
-  // ── Submit task ──────────────────────────────────────────────────────────────
+  // ── Submit ────────────────────────────────────────────────────────────────
   const submitTask = useCallback(
     async (
       prompt: string,
@@ -373,7 +859,7 @@ export default function Home() {
       params: Record<string, string> = {}
     ) => {
       setSubmitting(true);
-      setSelectedAction(null);
+      setActiveForm(null);
       try {
         const r = await fetch("/api/tasks", {
           method: "POST",
@@ -391,113 +877,364 @@ export default function Home() {
     []
   );
 
-  // ── Approve / Deny ───────────────────────────────────────────────────────────
-  const handleApprove = useCallback(async (id: string) => {
-    await fetch(`/api/tasks/${id}/approve`, { method: "POST" });
-  }, []);
+  // ── Run button handler: clarify or submit directly ────────────────────────
+  const handleRun = () => {
+    const text = freeText.trim();
+    if (!text) return;
+    const clarification = suggestClarification(text);
+    if (clarification) {
+      setActiveForm({
+        action: { ...clarification, prompt: text },
+        isClarification: true,
+        originalPrompt: text,
+      });
+    } else {
+      submitTask(text);
+    }
+  };
 
-  const handleDeny = useCallback(async (id: string) => {
-    await fetch(`/api/tasks/${id}/deny`, { method: "POST" });
-  }, []);
+  // ── Approve / Deny ────────────────────────────────────────────────────────
+  const handleApprove = useCallback(async () => {
+    if (!activeTaskId) return;
+    await fetch(`/api/tasks/${activeTaskId}/approve`, { method: "POST" });
+    closeApproval();
+  }, [activeTaskId]); // eslint-disable-line
+
+  const handleDeny = useCallback(async () => {
+    if (!activeTaskId) return;
+    await fetch(`/api/tasks/${activeTaskId}/deny`, { method: "POST" });
+    closeApproval();
+  }, [activeTaskId]); // eslint-disable-line
 
   return (
-    <div className="min-h-screen bg-zinc-950 flex flex-col">
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=DM+Sans:wght@300;400;500&display=swap');
+
+        .page-dot-grid {
+          position: fixed;
+          inset: 0;
+          background-image: radial-gradient(circle, #27272a 1px, transparent 1px);
+          background-size: 28px 28px;
+          opacity: 0.55;
+          pointer-events: none;
+          z-index: 0;
+        }
+        .page-glow {
+          position: fixed;
+          top: 0; left: 0; right: 0;
+          height: 320px;
+          background: radial-gradient(ellipse 80% 60% at 50% -10%, rgba(56, 189, 248, 0.07) 0%, transparent 70%);
+          pointer-events: none;
+          z-index: 0;
+        }
+        .header-wordmark {
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 14px;
+          font-weight: 600;
+          letter-spacing: 0.15em;
+          text-transform: uppercase;
+          color: #f4f4f5;
+        }
+        .header-cursor {
+          display: inline-block;
+          width: 2px;
+          height: 0.9em;
+          background: #38bdf8;
+          margin-left: 2px;
+          vertical-align: middle;
+          border-radius: 1px;
+          animation: blink-cursor 1.1s step-end infinite;
+          box-shadow: 0 0 5px rgba(56, 189, 248, 0.7);
+        }
+        @keyframes blink-cursor {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0; }
+        }
+        .mono-label {
+          font-family: 'IBM Plex Mono', monospace !important;
+          font-size: 10px !important;
+          font-weight: 500 !important;
+          letter-spacing: 0.1em !important;
+          text-transform: uppercase !important;
+          color: #71717a !important;
+        }
+      `}</style>
+
+      <div className="page-dot-grid" />
+      <div className="page-glow" />
+
+    <AppShell
+      header={{ height: 52 }}
+      styles={{
+        root: { background: "#09090b" },
+        header: {
+          background: "rgba(9, 9, 11, 0.92)",
+          backdropFilter: "blur(12px)",
+          borderBottom: "1px solid rgba(56,189,248,0.07)",
+          boxShadow: "0 1px 0 #1c1c20",
+        },
+        main: { background: "transparent", paddingTop: "calc(52px + 24px)", position: "relative", zIndex: 1 },
+      }}
+    >
       {/* ── Header ── */}
-      <header className="border-b border-zinc-800 px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="text-lg font-bold text-zinc-100 tracking-tight">
-            Remotely
+      <AppShell.Header style={{ zIndex: 10 }}>
+        <Flex align="center" justify="space-between" h="100%" px="lg">
+          <span className="header-wordmark">
+            Remotely<span className="header-cursor" />
           </span>
-          <span className="text-xs text-zinc-600 hidden sm:block">
-            laptop control
-          </span>
-        </div>
-        <div className="flex items-center gap-2 text-xs">
-          <span
-            className={`w-2 h-2 rounded-full ${
-              bridgeOnline ? "bg-green-500 animate-pulse" : "bg-zinc-600"
-            }`}
-          />
-          <span className={bridgeOnline ? "text-green-400" : "text-zinc-500"}>
-            {bridgeOnline ? "Laptop connected" : "Laptop offline"}
-          </span>
-        </div>
-      </header>
+          <Badge
+            color={bridgeOnline ? "green" : "gray"}
+            variant="dot"
+            size="sm"
+            tt="none"
+            fw={500}
+            style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: "0.06em" }}
+          >
+            {bridgeOnline ? "Connected" : "Offline"}
+          </Badge>
+        </Flex>
+      </AppShell.Header>
 
       {/* ── Main ── */}
-      <main className="flex-1 max-w-2xl w-full mx-auto px-4 py-6 space-y-4">
-        {/* Task Input Card */}
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-          {selectedAction ? (
-            <QuickActionForm
-              action={selectedAction}
-              onSubmit={submitTask}
-              onCancel={() => setSelectedAction(null)}
-            />
-          ) : (
-            <div className="space-y-3">
-              <textarea
-                rows={3}
-                placeholder="Type a command for your laptop... e.g. 'Submit my CS101 HW3 on Gradescope'"
-                value={freeText}
-                onChange={(e) => setFreeText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                    if (freeText.trim()) submitTask(freeText.trim());
+      <AppShell.Main>
+        <Box maw={680} mx="auto" px="md" pb="xl">
+          <Stack gap="md">
+
+            {/* ── Input / Form Card ── */}
+            <Paper
+              p="md"
+              radius="md"
+              style={{
+                background: "rgba(24, 24, 27, 0.9)",
+                border: "1px solid #27272a",
+                boxShadow: "0 0 0 1px rgba(56,189,248,0.05), 0 8px 32px rgba(0,0,0,0.4)",
+                backdropFilter: "blur(12px)",
+              }}
+            >
+              {activeForm ? (
+                /* ── Inline form (example or clarification) ── */
+                <InlineActionForm
+                  form={activeForm}
+                  submitting={submitting}
+                  onSubmit={submitTask}
+                  onBack={() => setActiveForm(null)}
+                  onSkip={
+                    activeForm.isClarification
+                      ? () => submitTask(activeForm.originalPrompt!)
+                      : undefined
                   }
+                />
+              ) : (
+                /* ── Default input view ── */
+                <Stack gap="sm">
+                  <Textarea
+                    placeholder='What should your laptop do?  e.g. "Submit my CS101 HW3 on Gradescope"'
+                    autosize
+                    minRows={2}
+                    maxRows={6}
+                    value={freeText}
+                    onChange={(e) => setFreeText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && freeText.trim()) {
+                        handleRun();
+                      }
+                    }}
+                    styles={{
+                      input: {
+                        background: "var(--mantine-color-dark-9)",
+                        border: "1px solid var(--mantine-color-dark-5)",
+                        color: "var(--mantine-color-gray-1)",
+                        fontSize: "0.875rem",
+                        lineHeight: 1.6,
+                        resize: "none",
+                      },
+                    }}
+                  />
+
+                  {/* Examples row */}
+                  <Box>
+                    <Group gap={6} align="center">
+                      <Text
+                        size="xs"
+                        c="dimmed"
+                        fw={500}
+                        style={{ letterSpacing: "0.1em", flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, textTransform: "uppercase" }}
+                      >
+                        Examples:
+                      </Text>
+                      {allExamples.map((a) => (
+                        <Group
+                          key={a.id ?? a.type}
+                          gap={0}
+                          style={{ position: "relative" }}
+                        >
+                          <Button
+                            size="xs"
+                            variant="default"
+                            onClick={() =>
+                              setActiveForm({ action: a, isClarification: false })
+                            }
+                            styles={{
+                              root: {
+                                background: "var(--mantine-color-dark-7)",
+                                border: "1px solid var(--mantine-color-dark-5)",
+                                color: "var(--mantine-color-dark-1)",
+                                fontSize: "0.72rem",
+                                height: 26,
+                                padding: "0 10px",
+                                borderRadius: a.id
+                                  ? "var(--mantine-radius-md) 0 0 var(--mantine-radius-md)"
+                                  : undefined,
+                                borderRight: a.id ? "none" : undefined,
+                              },
+                            }}
+                          >
+                            {a.label}
+                          </Button>
+                          {a.id && (
+                            <Tooltip label="Remove" withArrow position="top">
+                              <ActionIcon
+                                size={26}
+                                variant="default"
+                                onClick={() => handleDeleteAction(a.id!)}
+                                styles={{
+                                  root: {
+                                    background: "var(--mantine-color-dark-7)",
+                                    border: "1px solid var(--mantine-color-dark-5)",
+                                    borderLeft: "1px solid var(--mantine-color-dark-5)",
+                                    borderRadius:
+                                      "0 var(--mantine-radius-md) var(--mantine-radius-md) 0",
+                                    color: "var(--mantine-color-dark-3)",
+                                    "&:hover": {
+                                      color: "var(--mantine-color-red-4)",
+                                    },
+                                  },
+                                }}
+                              >
+                                <span style={{ fontSize: 9 }}>✕</span>
+                              </ActionIcon>
+                            </Tooltip>
+                          )}
+                        </Group>
+                      ))}
+
+                      {/* Add custom action */}
+                      <Tooltip label="Add example" withArrow position="top">
+                        <ActionIcon
+                          size={26}
+                          variant="default"
+                          onClick={openAddAction}
+                          styles={{
+                            root: {
+                              background: "transparent",
+                              border: "1px dashed var(--mantine-color-dark-5)",
+                              color: "var(--mantine-color-dark-3)",
+                            },
+                          }}
+                        >
+                          <span style={{ fontSize: 14, lineHeight: 1 }}>+</span>
+                        </ActionIcon>
+                      </Tooltip>
+                    </Group>
+                  </Box>
+
+                  {/* Submit */}
+                  <Group justify="flex-end">
+                    <Button
+                      size="sm"
+                      fw={500}
+                      loading={submitting}
+                      disabled={!freeText.trim() || submitting}
+                      onClick={handleRun}
+                      rightSection={
+                        <Text
+                          size="xs"
+                          style={{
+                            fontFamily: "'IBM Plex Mono', monospace",
+                            opacity: 0.6,
+                            color: "#bae6fd",
+                          }}
+                        >
+                          ⌘↵
+                        </Text>
+                      }
+                      styles={{
+                        root: {
+                          paddingLeft: 16,
+                          paddingRight: 10,
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          fontSize: 11,
+                          letterSpacing: "0.1em",
+                          textTransform: "uppercase",
+                          background: "linear-gradient(135deg, #0ea5e9, #38bdf8)",
+                          border: "none",
+                          "&:hover": { boxShadow: "0 0 16px rgba(56,189,248,0.3)" },
+                        },
+                      }}
+                    >
+                      Run
+                    </Button>
+                  </Group>
+                </Stack>
+              )}
+            </Paper>
+
+            {/* Offline warning */}
+            {!bridgeOnline && (
+              <Alert
+                color="yellow"
+                variant="light"
+                styles={{
+                  root: {
+                    background: "rgba(202, 138, 4, 0.08)",
+                    border: "1px solid rgba(202, 138, 4, 0.2)",
+                  },
+                  message: { color: "var(--mantine-color-yellow-4)", fontSize: "0.8rem" },
                 }}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-600 focus:ring-1 focus:ring-sky-600/30 resize-none"
-              />
-
-              {/* Quick action buttons */}
-              <div className="flex flex-wrap gap-2">
-                {QUICK_ACTIONS.map((a) => (
-                  <button
-                    key={a.type}
-                    onClick={() => setSelectedAction(a)}
-                    className="px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
-                  >
-                    {a.label}
-                  </button>
-                ))}
-              </div>
-
-              <button
-                onClick={() => freeText.trim() && submitTask(freeText.trim())}
-                disabled={!freeText.trim() || submitting}
-                className="w-full py-2 text-sm font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
               >
-                {submitting ? "Submitting..." : "Run on Laptop  ⌘↵"}
-              </button>
-            </div>
-          )}
-        </div>
+                Laptop agent is offline. Start{" "}
+                <Code
+                  style={{
+                    background: "var(--mantine-color-dark-7)",
+                    color: "var(--mantine-color-gray-3)",
+                    fontSize: "0.75rem",
+                  }}
+                >
+                  services/agent-bridge/bridge.py
+                </Code>{" "}
+                on your laptop to connect.
+              </Alert>
+            )}
 
-        {/* Offline warning */}
-        {!bridgeOnline && (
-          <div className="rounded-lg border border-amber-800 bg-amber-950/50 px-4 py-3 text-xs text-amber-300">
-            Laptop agent is offline. Start{" "}
-            <code className="bg-zinc-800 px-1 rounded">services/agent-bridge/bridge.py</code>{" "}
-            on your laptop to connect.
-          </div>
-        )}
+            {/* Active task */}
+            {activeTask && (
+              <ActiveTaskPanel task={activeTask} onOpenApproval={openApproval} />
+            )}
 
-        {/* Active task */}
-        {activeTask && (
-          <ActiveTaskPanel
-            task={activeTask}
-            onApprove={handleApprove}
-            onDeny={handleDeny}
-          />
-        )}
+            {/* History */}
+            <TaskHistoryList
+              tasks={tasks}
+              activeId={activeTaskId}
+              onSelect={setActiveTaskId}
+            />
+          </Stack>
+        </Box>
+      </AppShell.Main>
 
-        {/* Task history */}
-        <TaskHistory
-          tasks={tasks}
-          activeId={activeTaskId}
-          onSelect={setActiveTaskId}
-        />
-      </main>
-    </div>
+      {/* ── Modals ── */}
+      <ApprovalModal
+        task={activeTask}
+        opened={approvalOpen}
+        onApprove={handleApprove}
+        onDeny={handleDeny}
+      />
+      <AddActionModal
+        opened={addActionOpen}
+        onClose={closeAddAction}
+        onAdd={handleAddAction}
+      />
+    </AppShell>
+    </>
   );
 }

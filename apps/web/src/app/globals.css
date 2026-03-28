@@ -1,21 +1,13 @@
-@tailwind base;
-@tailwind components;
+/* Tailwind utilities only — base reset is handled by Mantine */
 @tailwind utilities;
 
-:root {
-  --font-mono: "SF Mono", "Fira Code", "Cascadia Code", ui-monospace, monospace;
-}
-
-html {
-  background-color: #09090b;
-}
-
-/* Custom scrollbar for dark theme */
+/* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: #18181b;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: #3f3f46;
@@ -25,11 +17,11 @@ html {
   background: #52525b;
 }
 
-/* Log entry animations */
-@keyframes slideIn {
+/* Log entry slide-in animation */
+@keyframes logSlideIn {
   from {
     opacity: 0;
-    transform: translateX(-6px);
+    transform: translateX(-4px);
   }
   to {
     opacity: 1;
@@ -38,5 +30,5 @@ html {
 }
 
 .log-entry {
-  animation: slideIn 0.15s ease-out forwards;
+  animation: logSlideIn 0.12s ease-out forwards;
 }
