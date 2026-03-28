@@ -554,9 +554,11 @@ function LogViewer({ logs }: { logs: LogEntry[] }) {
 function ActiveTaskPanel({
   task,
   onOpenApproval,
+  onKill,
 }: {
   task: Task;
   onOpenApproval: () => void;
+  onKill: () => void;
 }) {
   const hasResult =
     (task.state === "completed" || task.state === "failed" || task.state === "denied") &&
@@ -599,6 +601,30 @@ function ActiveTaskPanel({
             <Button size="xs" color="yellow" variant="filled" fw={600} onClick={onOpenApproval}>
               Review
             </Button>
+          )}
+          {(task.state === "running" || task.state === "queued" || task.state === "waiting_approval") && (
+            <Tooltip label="Abort agent" withArrow position="top">
+              <Button
+                size="xs"
+                onClick={onKill}
+                styles={{
+                  root: {
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    fontSize: 10,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                    height: 24,
+                    padding: "0 10px",
+                    background: "rgba(239,68,68,0.1)",
+                    border: "1px solid rgba(239,68,68,0.3)",
+                    color: "#f87171",
+                    "&:hover": { background: "rgba(239,68,68,0.2)" },
+                  },
+                }}
+              >
+                Kill
+              </Button>
+            </Tooltip>
           )}
         </Group>
       </Group>
@@ -724,6 +750,195 @@ function TaskHistoryList({
         ))}
       </Paper>
     </Box>
+  );
+}
+
+// ─── ScreenMonitor ────────────────────────────────────────────────────────────
+
+function ScreenMonitor() {
+  const [enabled, setEnabled] = useState(false);
+  const [frame, setFrame] = useState<string | null>(null);
+  const [lastTs, setLastTs] = useState<number | null>(null);
+  const [toggling, setToggling] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startPolling = () => {
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch("/api/screen/frame");
+        const d = await r.json();
+        if (d.frame) { setFrame(d.frame); setLastTs(d.ts); }
+      } catch {}
+    }, 500);
+  };
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const toggle = async () => {
+    setToggling(true);
+    try {
+      const next = !enabled;
+      await fetch("/api/screen/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      setEnabled(next);
+      if (next) { startPolling(); } else { stopPolling(); setFrame(null); setLastTs(null); }
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  useEffect(() => () => stopPolling(), []);
+
+  const fps = lastTs ? `${((Date.now() - lastTs) / 1000).toFixed(1)}s ago` : null;
+
+  return (
+    <Paper
+      p="md"
+      radius="md"
+      style={{
+        background: "rgba(24, 24, 27, 0.9)",
+        border: enabled ? "1px solid rgba(56,189,248,0.25)" : "1px solid #27272a",
+        boxShadow: enabled
+          ? "0 0 0 1px rgba(56,189,248,0.08), 0 0 24px rgba(56,189,248,0.06), 0 8px 32px rgba(0,0,0,0.4)"
+          : "0 0 0 1px rgba(56,189,248,0.04), 0 8px 32px rgba(0,0,0,0.4)",
+        backdropFilter: "blur(12px)",
+        transition: "border-color 0.2s ease, box-shadow 0.2s ease",
+      }}
+    >
+      {/* Header row */}
+      <Group justify="space-between" align="center" mb={enabled ? "sm" : 0}>
+        <Group gap="sm" align="center">
+          <Box
+            style={{
+              width: 28, height: 28, borderRadius: 6,
+              background: enabled ? "rgba(56,189,248,0.12)" : "rgba(39,39,42,0.8)",
+              border: enabled ? "1px solid rgba(56,189,248,0.25)" : "1px solid #3f3f46",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              transition: "all 0.2s ease",
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={enabled ? "#38bdf8" : "#71717a"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
+          </Box>
+          <Box>
+            <Text
+              style={{
+                fontFamily: "'IBM Plex Mono', monospace",
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                color: enabled ? "#f4f4f5" : "#71717a",
+                transition: "color 0.2s ease",
+              }}
+            >
+              Screen Monitor
+            </Text>
+            {enabled && lastTs && (
+              <Text style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, color: "#52525b", letterSpacing: "0.05em" }}>
+                LIVE · updated {fps}
+              </Text>
+            )}
+          </Box>
+        </Group>
+
+        <Button
+          size="xs"
+          loading={toggling}
+          onClick={toggle}
+          styles={{
+            root: {
+              fontFamily: "'IBM Plex Mono', monospace",
+              fontSize: 10,
+              letterSpacing: "0.1em",
+              textTransform: "uppercase",
+              height: 28,
+              paddingLeft: 12,
+              paddingRight: 12,
+              background: enabled
+                ? "rgba(239,68,68,0.12)"
+                : "linear-gradient(135deg, #0ea5e9, #38bdf8)",
+              border: enabled ? "1px solid rgba(239,68,68,0.3)" : "none",
+              color: enabled ? "#f87171" : "#fff",
+              transition: "all 0.2s ease",
+            },
+          }}
+        >
+          {enabled ? "Stop" : "Start"}
+        </Button>
+      </Group>
+
+      {/* Live frame */}
+      {enabled && (
+        <Box
+          style={{
+            borderRadius: 6,
+            overflow: "hidden",
+            border: "1px solid rgba(56,189,248,0.12)",
+            background: "#050507",
+            aspectRatio: "16/9",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            position: "relative",
+          }}
+        >
+          {frame ? (
+            <img
+              src={`data:image/jpeg;base64,${frame}`}
+              alt="Live screen"
+              style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+            />
+          ) : (
+            <Stack align="center" gap={6}>
+              <Box style={{ position: "relative", width: 20, height: 20 }}>
+                <Box style={{
+                  width: 20, height: 20, borderRadius: "50%",
+                  border: "2px solid #27272a",
+                  borderTopColor: "#38bdf8",
+                  animation: "spin 0.8s linear infinite",
+                }} />
+              </Box>
+              <Text style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#52525b", letterSpacing: "0.08em" }}>
+                Waiting for bridge…
+              </Text>
+            </Stack>
+          )}
+          {/* Live indicator */}
+          {frame && (
+            <Box style={{
+              position: "absolute", top: 8, right: 8,
+              display: "flex", alignItems: "center", gap: 5,
+              background: "rgba(9,9,11,0.75)", borderRadius: 4,
+              padding: "3px 7px", backdropFilter: "blur(4px)",
+            }}>
+              <Box style={{
+                width: 6, height: 6, borderRadius: "50%",
+                background: "#22c55e",
+                boxShadow: "0 0 5px rgba(34,197,94,0.6)",
+                animation: "pulse-live 2s ease-in-out infinite",
+              }} />
+              <Text style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, color: "#71717a", letterSpacing: "0.08em" }}>LIVE</Text>
+            </Box>
+          )}
+        </Box>
+      )}
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse-live {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.6; transform: scale(0.85); }
+        }
+      `}</style>
+    </Paper>
   );
 }
 
@@ -892,6 +1107,13 @@ export default function Home() {
       submitTask(text);
     }
   };
+
+  // ── Kill ──────────────────────────────────────────────────────────────────
+  const handleKill = useCallback(async () => {
+    if (!activeTaskId) return;
+    await fetch(`/api/tasks/${activeTaskId}/kill`, { method: "POST" });
+    closeApproval();
+  }, [activeTaskId]); // eslint-disable-line
 
   // ── Approve / Deny ────────────────────────────────────────────────────────
   const handleApprove = useCallback(async () => {
@@ -1207,9 +1429,12 @@ export default function Home() {
               </Alert>
             )}
 
+            {/* Screen monitor */}
+            <ScreenMonitor />
+
             {/* Active task */}
             {activeTask && (
-              <ActiveTaskPanel task={activeTask} onOpenApproval={openApproval} />
+              <ActiveTaskPanel task={activeTask} onOpenApproval={openApproval} onKill={handleKill} />
             )}
 
             {/* History */}

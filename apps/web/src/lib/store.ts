@@ -5,6 +5,12 @@ class TaskStore extends EventEmitter {
   private tasks = new Map<string, Task>();
   // Track whether the bridge is alive
   private lastHeartbeat: number = 0;
+  // Screen streaming
+  screenEnabled: boolean = false;
+  latestFrame: string | null = null; // base64 JPEG
+  frameTimestamp: number = 0;
+  // Kill signals
+  private pendingKills = new Set<string>();
 
   getTask(id: string): Task | undefined {
     return this.tasks.get(id);
@@ -97,6 +103,36 @@ class TaskStore extends EventEmitter {
   isBridgeOnline(): boolean {
     // Consider bridge online if heartbeat within last 10 seconds
     return Date.now() - this.lastHeartbeat < 10_000;
+  }
+
+  setScreenEnabled(enabled: boolean) {
+    this.screenEnabled = enabled;
+    if (!enabled) this.latestFrame = null;
+    this.emit("screenToggled", enabled);
+  }
+
+  setFrame(base64: string) {
+    this.latestFrame = base64;
+    this.frameTimestamp = Date.now();
+    this.emit("newFrame");
+  }
+
+  killTask(id: string): boolean {
+    const task = this.tasks.get(id);
+    if (!task || !["queued", "running", "waiting_approval"].includes(task.state)) return false;
+    this.pendingKills.add(id);
+    task.state = "failed";
+    task.result = "Killed by user";
+    task.updatedAt = new Date().toISOString();
+    task.approvalContext = undefined;
+    this.emit("taskUpdated", task);
+    return true;
+  }
+
+  checkAndClearKill(id: string): boolean {
+    const had = this.pendingKills.has(id);
+    this.pendingKills.delete(id);
+    return had;
   }
 }
 
