@@ -1,11 +1,5 @@
 # Remotely — Remote Control for Your Laptop
 
-A focused remote control layer for your own laptop, powered by OpenClaw (Claude computer use).
-
-Open the web app from your phone or any device, give your laptop a command, and watch it execute in real time — with approval gates before any dangerous action.
-
----
-
 ## Architecture
 
 ```
