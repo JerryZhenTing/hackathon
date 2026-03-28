@@ -6,6 +6,7 @@ import type { Task, TaskType, LogEntry } from "@/lib/types";
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface QuickAction {
+  id?: string;
   label: string;
   type: TaskType;
   prompt: string;
@@ -406,6 +407,129 @@ function QuickActionForm({
   );
 }
 
+// ─── Add Action Modal ─────────────────────────────────────────────────────────
+
+const STORAGE_KEY = "remotely-custom-actions";
+
+function AddActionModal({
+  open,
+  onClose,
+  onAdd,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAdd: (action: QuickAction) => void;
+}) {
+  const [label, setLabel] = useState("");
+  const [fields, setFields] = useState([{ label: "", placeholder: "" }]);
+
+  const reset = () => {
+    setLabel("");
+    setFields([{ label: "", placeholder: "" }]);
+  };
+
+  const handleClose = () => { reset(); onClose(); };
+
+  const updateField = (i: number, key: "label" | "placeholder", val: string) =>
+    setFields((prev) => prev.map((f, j) => (j === i ? { ...f, [key]: val } : f)));
+
+  const handleSave = () => {
+    if (!label.trim()) return;
+    onAdd({
+      id: `custom-${Date.now()}`,
+      label: label.trim(),
+      type: "raw",
+      prompt: label.trim(),
+      fields: fields
+        .filter((f) => f.label.trim())
+        .map((f) => ({
+          key: f.label.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, ""),
+          label: f.label.trim(),
+          placeholder: f.placeholder.trim(),
+        })),
+    });
+    handleClose();
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} />
+      <div className="relative z-10 w-full max-w-sm mx-4 rounded-xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl">
+        <h2 className="text-sm font-semibold text-zinc-100 mb-4">New Quick Action</h2>
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs text-zinc-500 mb-1">Action name</label>
+            <input
+              autoFocus
+              type="text"
+              placeholder="e.g. Send Email, Run Script…"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSave()}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-600 focus:ring-1 focus:ring-sky-600/30"
+            />
+          </div>
+
+          <div>
+            <p className="text-xs text-zinc-500 uppercase tracking-wider mb-2">Fields (optional)</p>
+            <div className="space-y-2">
+              {fields.map((f, i) => (
+                <div key={i} className="flex gap-2 items-center">
+                  <input
+                    type="text"
+                    placeholder="Field label"
+                    value={f.label}
+                    onChange={(e) => updateField(i, "label", e.target.value)}
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-600"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Placeholder"
+                    value={f.placeholder}
+                    onChange={(e) => updateField(i, "placeholder", e.target.value)}
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-600"
+                  />
+                  {fields.length > 1 && (
+                    <button
+                      onClick={() => setFields((prev) => prev.filter((_, j) => j !== i))}
+                      className="text-zinc-600 hover:text-zinc-400 text-xs px-1"
+                    >✕</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={() => setFields((prev) => [...prev, { label: "", placeholder: "" }])}
+              className="mt-2 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              + Add field
+            </button>
+          </div>
+
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={handleSave}
+              disabled={!label.trim()}
+              className="flex-1 py-2 text-sm font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+            >
+              Save Action
+            </button>
+            <button
+              onClick={handleClose}
+              className="px-4 py-2 text-sm rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Home() {
@@ -416,6 +540,24 @@ export default function Home() {
   const [selectedAction, setSelectedAction] = useState<QuickAction | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [visualAgent, setVisualAgent] = useState(false);
+  const [customActions, setCustomActions] = useState<QuickAction[]>([]);
+  const [addActionOpen, setAddActionOpen] = useState(false);
+
+  // Load custom actions from localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) setCustomActions(JSON.parse(saved));
+    } catch {}
+  }, []);
+
+  const saveCustomActions = (actions: QuickAction[]) => {
+    setCustomActions(actions);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(actions)); } catch {}
+  };
+
+  const handleAddAction = (action: QuickAction) => saveCustomActions([...customActions, action]);
+  const handleDeleteAction = (id: string) => saveCustomActions(customActions.filter((a) => a.id !== id));
 
   const activeTask = tasks.find((t) => t.id === activeTaskId) ?? null;
 
@@ -591,16 +733,33 @@ export default function Home() {
               </label>
 
               {/* Quick action buttons */}
-              <div className="flex flex-wrap gap-2">
-                {QUICK_ACTIONS.map((a) => (
-                  <button
-                    key={a.type}
-                    onClick={() => setSelectedAction(a)}
-                    className="px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
-                  >
-                    {a.label}
-                  </button>
+              <div className="flex flex-wrap gap-2 items-center">
+                {[...QUICK_ACTIONS, ...customActions].map((a) => (
+                  <div key={a.id ?? a.type} className="flex items-center">
+                    <button
+                      onClick={() => setSelectedAction(a)}
+                      className={`px-3 py-1.5 text-xs border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors ${a.id ? "rounded-l-lg border-r-0" : "rounded-lg"}`}
+                    >
+                      {a.label}
+                    </button>
+                    {a.id && (
+                      <button
+                        onClick={() => handleDeleteAction(a.id!)}
+                        title="Remove"
+                        className="px-1.5 py-1.5 text-xs rounded-r-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 hover:text-red-400 text-zinc-600 transition-colors"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
                 ))}
+                <button
+                  onClick={() => setAddActionOpen(true)}
+                  title="Add quick action"
+                  className="w-7 h-7 flex items-center justify-center text-sm rounded-lg border border-dashed border-zinc-700 bg-transparent hover:border-zinc-500 hover:text-zinc-300 text-zinc-600 transition-colors"
+                >
+                  +
+                </button>
               </div>
 
               <button
@@ -654,6 +813,12 @@ export default function Home() {
           onSelect={setActiveTaskId}
         />
       </main>
+
+      <AddActionModal
+        open={addActionOpen}
+        onClose={() => setAddActionOpen(false)}
+        onAdd={handleAddAction}
+      />
     </div>
   );
 }
