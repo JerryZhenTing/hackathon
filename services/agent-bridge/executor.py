@@ -1,0 +1,324 @@
+"""
+executor.py — Two executor implementations:
+
+MockExecutor: Simulates task execution with realistic delays.
+              Great for demo without real API keys.
+
+RealExecutor: Uses Anthropic's Claude API with computer_use,
+              bash, and text_editor tools (the OpenClaw equivalent).
+"""
+
+import os
+import time
+import json
+import subprocess
+import logging
+from typing import Callable
+
+log = logging.getLogger("executor")
+
+LogFn = Callable[[str, str, str], None]      # (task_id, level, message)
+ApprovalFn = Callable[[str, str, str, str], bool]  # (task_id, action, description, risk) -> bool
+
+
+# ─── Mock Executor ────────────────────────────────────────────────────────────
+
+class MockExecutor:
+    """
+    Simulates execution for demo/testing purposes.
+    Returns canned results with realistic step delays.
+    """
+
+    def run_browser(self, task_id: str, steps: list[str], log_fn: LogFn) -> str:
+        for step in steps:
+            log_fn(task_id, "step", step)
+            time.sleep(0.8)
+        return "Mock browser task completed."
+
+    def run_shell(self, task_id: str, command: str, log_fn: LogFn) -> str:
+        log_fn(task_id, "action", f"$ {command}")
+        time.sleep(1.0)
+        # Actually run the command for real shell tasks (safe ones)
+        try:
+            result = subprocess.run(
+                command, shell=True, capture_output=True, text=True, timeout=30
+            )
+            output = result.stdout + result.stderr
+            log_fn(task_id, "info", output.strip() or "(no output)")
+            return output
+        except Exception as e:
+            log_fn(task_id, "error", str(e))
+            return str(e)
+
+    def run_raw(self, task_id: str, prompt: str, log_fn: LogFn, approval_fn: ApprovalFn) -> str:
+        log_fn(task_id, "info", f"[MOCK] Processing: {prompt}")
+        time.sleep(1.5)
+        log_fn(task_id, "step", "Analyzing request...")
+        time.sleep(1.0)
+        log_fn(task_id, "step", "Executing task...")
+        time.sleep(1.5)
+        return f"[MOCK] Task complete: {prompt}"
+
+
+# ─── Real Executor ────────────────────────────────────────────────────────────
+
+class RealExecutor:
+    """
+    Uses Anthropic Claude with computer_use, bash, and text_editor tools.
+    This is the OpenClaw-equivalent execution layer.
+    """
+
+    def __init__(self):
+        import anthropic
+        self.client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        self.model = os.getenv("CLAUDE_MODEL", "claude-opus-4-5-20251101")
+
+    def _run_agentic_loop(
+        self,
+        task_id: str,
+        system_prompt: str,
+        user_message: str,
+        log_fn: LogFn,
+        approval_fn: ApprovalFn,
+        max_iterations: int = 30,
+    ) -> str:
+        """
+        Core agentic loop: sends messages to Claude, handles tool calls,
+        streams logs back to the frontend.
+        """
+        import anthropic
+
+        messages = [{"role": "user", "content": user_message}]
+
+        tools = [
+            {
+                "type": "computer_20241022",
+                "name": "computer",
+                "display_width_px": 1920,
+                "display_height_px": 1080,
+                "display_number": 1,
+            },
+            {
+                "type": "bash_20241022",
+                "name": "bash",
+            },
+            {
+                "type": "text_editor_20241022",
+                "name": "str_replace_editor",
+            },
+        ]
+
+        final_result = ""
+
+        for iteration in range(max_iterations):
+            log_fn(task_id, "info", f"Agent iteration {iteration + 1}...")
+
+            response = self.client.beta.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=system_prompt,
+                tools=tools,  # type: ignore
+                messages=messages,
+                betas=["computer-use-2024-10-22"],
+            )
+
+            # Collect assistant content
+            assistant_content = []
+
+            for block in response.content:
+                if block.type == "text":
+                    if block.text:
+                        log_fn(task_id, "info", f"Agent: {block.text[:200]}")
+                        final_result = block.text
+                    assistant_content.append({"type": "text", "text": block.text})
+
+                elif block.type == "tool_use":
+                    tool_name = block.name
+                    tool_input = block.input
+                    log_fn(task_id, "action", f"Tool: {tool_name} — {json.dumps(tool_input)[:120]}")
+                    assistant_content.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": tool_name,
+                        "input": tool_input,
+                    })
+
+            messages.append({"role": "assistant", "content": assistant_content})
+
+            # Check stop reason
+            if response.stop_reason == "end_turn":
+                log_fn(task_id, "step", "Agent finished.")
+                break
+
+            if response.stop_reason != "tool_use":
+                log_fn(task_id, "warn", f"Unexpected stop reason: {response.stop_reason}")
+                break
+
+            # Execute tool calls
+            tool_results = []
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+
+                result = self._execute_tool(
+                    task_id=task_id,
+                    tool_name=block.name,
+                    tool_input=block.input,
+                    log_fn=log_fn,
+                    approval_fn=approval_fn,
+                )
+
+                if result == "__DENIED__":
+                    return "Task denied by user before completion."
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
+
+            messages.append({"role": "user", "content": tool_results})
+
+        return final_result or "Task completed."
+
+    def _execute_tool(
+        self,
+        task_id: str,
+        tool_name: str,
+        tool_input: dict,
+        log_fn: LogFn,
+        approval_fn: ApprovalFn,
+    ) -> str:
+        """Execute a single tool call. Returns tool output or '__DENIED__'."""
+
+        if tool_name == "bash":
+            cmd = tool_input.get("command", "")
+            # Flag destructive commands for approval
+            dangerous = any(
+                kw in cmd
+                for kw in ["rm -rf", "sudo", "mkfs", "dd ", "> /dev/", "git push", "git commit"]
+            )
+            if dangerous:
+                approved = approval_fn(
+                    task_id,
+                    f"Run: {cmd[:60]}",
+                    f"About to execute shell command:\n{cmd}",
+                    "high",
+                )
+                if not approved:
+                    return "__DENIED__"
+
+            try:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=60
+                )
+                output = (result.stdout + result.stderr).strip()
+                log_fn(task_id, "info", f"$ {cmd[:80]}\n{output[:400]}")
+                return output or "(no output)"
+            except subprocess.TimeoutExpired:
+                return "Command timed out."
+            except Exception as e:
+                return f"Error: {e}"
+
+        elif tool_name == "str_replace_editor":
+            command = tool_input.get("command", "")
+            path = tool_input.get("path", "")
+
+            if command == "view":
+                try:
+                    with open(path) as f:
+                        content = f.read()
+                    log_fn(task_id, "step", f"Read {path} ({len(content)} chars)")
+                    return content
+                except Exception as e:
+                    return f"Error reading {path}: {e}"
+
+            elif command in ("create", "str_replace"):
+                approved = approval_fn(
+                    task_id,
+                    f"Edit file: {path}",
+                    f"About to modify {path} using str_replace_editor ({command})",
+                    "medium",
+                )
+                if not approved:
+                    return "__DENIED__"
+
+                try:
+                    if command == "create":
+                        new_content = tool_input.get("file_text", "")
+                        with open(path, "w") as f:
+                            f.write(new_content)
+                        log_fn(task_id, "step", f"Created {path}")
+                        return f"File created: {path}"
+                    else:  # str_replace
+                        old_str = tool_input.get("old_str", "")
+                        new_str = tool_input.get("new_str", "")
+                        with open(path) as f:
+                            content = f.read()
+                        if old_str not in content:
+                            return f"Error: old_str not found in {path}"
+                        content = content.replace(old_str, new_str, 1)
+                        with open(path, "w") as f:
+                            f.write(content)
+                        log_fn(task_id, "step", f"Edited {path}")
+                        return f"Replaced in {path}"
+                except Exception as e:
+                    return f"Error editing {path}: {e}"
+
+            return f"Unknown editor command: {command}"
+
+        elif tool_name == "computer":
+            # Computer use — screenshot, click, type, key, scroll
+            action = tool_input.get("action", "")
+            log_fn(task_id, "action", f"computer.{action}")
+
+            try:
+                import pyautogui  # type: ignore
+                import base64
+                from PIL import ImageGrab  # type: ignore
+
+                if action == "screenshot":
+                    img = ImageGrab.grab()
+                    import io
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    data = base64.b64encode(buf.getvalue()).decode()
+                    return [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}]
+
+                elif action == "left_click":
+                    x, y = tool_input["coordinate"]
+                    pyautogui.click(x, y)
+                    return f"Clicked ({x}, {y})"
+
+                elif action == "type":
+                    pyautogui.typewrite(tool_input.get("text", ""), interval=0.05)
+                    return "Typed text"
+
+                elif action == "key":
+                    pyautogui.hotkey(*tool_input.get("text", "").split("+"))
+                    return "Key pressed"
+
+                elif action == "scroll":
+                    x, y = tool_input["coordinate"]
+                    pyautogui.scroll(tool_input.get("direction", 0), x=x, y=y)
+                    return "Scrolled"
+
+                else:
+                    return f"Unknown computer action: {action}"
+
+            except ImportError:
+                log_fn(task_id, "warn", "pyautogui/PIL not installed — computer use unavailable")
+                return f"[computer use not available on this system — install pyautogui and PIL]"
+            except Exception as e:
+                return f"Computer use error: {e}"
+
+        return f"Unknown tool: {tool_name}"
+
+    def run_raw(self, task_id: str, prompt: str, log_fn: LogFn, approval_fn: ApprovalFn) -> str:
+        system = (
+            "You are a local laptop agent. Execute the user's task step by step. "
+            "Use bash for shell commands, str_replace_editor for file edits, "
+            "and computer for browser/GUI automation. "
+            "Log each step clearly. Do not take irreversible actions without approval."
+        )
+        return self._run_agentic_loop(task_id, system, prompt, log_fn, approval_fn)
