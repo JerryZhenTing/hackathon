@@ -6,10 +6,11 @@ export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { type, userPrompt, params } = body as {
+  const { type, userPrompt, params, visualAgent } = body as {
     type: TaskType;
     userPrompt: string;
     params: Record<string, string>;
+    visualAgent?: boolean;
   };
 
   if (!userPrompt?.trim()) {
@@ -21,6 +22,7 @@ export async function POST(req: NextRequest) {
     type: type || "raw",
     userPrompt,
     params: params || {},
+    visualAgent: !!visualAgent,
     state: "queued",
     logs: [],
     createdAt: new Date().toISOString(),

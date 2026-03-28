@@ -40,6 +40,7 @@ export interface Task {
   type: TaskType;
   userPrompt: string;
   params: GradescopeParams | CodeEditParams | Record<string, string>;
+  visualAgent?: boolean;
   state: TaskState;
   logs: LogEntry[];
   approvalContext?: ApprovalContext;

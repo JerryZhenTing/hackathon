@@ -84,6 +84,7 @@ class RealExecutor:
         api_fn: Optional[ApiFn] = None,
         max_iterations: int = 30,
         use_computer: bool = False,
+        visual_agent: bool = False,
     ) -> str:
         """
         Core agentic loop: sends messages to Claude, handles tool calls,
@@ -184,6 +185,7 @@ class RealExecutor:
                     tool_input=block.input,
                     log_fn=log_fn,
                     approval_fn=approval_fn,
+                    visual_agent=visual_agent,
                 )
 
                 if result == "__DENIED__":
@@ -199,6 +201,35 @@ class RealExecutor:
 
         return final_result or "Task completed."
 
+    def _open_path(self, path: str, log_fn: LogFn, task_id: str):
+        """Open a file or directory in its default macOS app."""
+        expanded = os.path.expanduser(path)
+        try:
+            result = subprocess.run(["open", expanded], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                log_fn(task_id, "step", f"Opened {expanded}")
+            else:
+                log_fn(task_id, "warn", f"open returned {result.returncode}: {result.stderr.decode().strip()}")
+        except Exception as e:
+            log_fn(task_id, "warn", f"Could not open {expanded}: {e}")
+
+    def _extract_output_paths(self, cmd: str) -> list[str]:
+        """Extract output file paths from bash commands (redirects, touch, mkdir, etc.)."""
+        import re
+        paths = []
+        # Redirections: cmd > file, cmd >> file
+        for m in re.finditer(r'>{1,2}\s*([^\s|&;]+)', cmd):
+            p = m.group(1)
+            if p not in ('/dev/null',):
+                paths.append(p)
+        # touch file
+        for m in re.finditer(r'\btouch\s+([^\s|&;]+)', cmd):
+            paths.append(m.group(1))
+        # mkdir -p dir / mkdir dir
+        for m in re.finditer(r'\bmkdir(?:\s+-p)?\s+([^\s|&;]+)', cmd):
+            paths.append(m.group(1))
+        return paths
+
     def _execute_tool(
         self,
         task_id: str,
@@ -206,6 +237,7 @@ class RealExecutor:
         tool_input: dict,
         log_fn: LogFn,
         approval_fn: ApprovalFn,
+        visual_agent: bool = False,
     ) -> str:
         """Execute a single tool call. Returns tool output or '__DENIED__'."""
 
@@ -236,6 +268,11 @@ class RealExecutor:
                 )
                 output = (result.stdout + result.stderr).strip()
                 log_fn(task_id, "info", f"$ {cmd[:80]}\n{output[:400]}")
+                if visual_agent:
+                    for p in self._extract_output_paths(cmd):
+                        full = os.path.expanduser(p)
+                        if os.path.exists(full):
+                            self._open_path(full, log_fn, task_id)
                 return output or "(no output)"
             except subprocess.TimeoutExpired:
                 return "Command timed out."
@@ -244,7 +281,7 @@ class RealExecutor:
 
         elif tool_name == "str_replace_based_edit_tool":
             command = tool_input.get("command", "")
-            path = tool_input.get("path", "")
+            path = os.path.expanduser(tool_input.get("path", ""))
 
             if command == "view":
                 try:
@@ -268,9 +305,12 @@ class RealExecutor:
                 try:
                     if command == "create":
                         new_content = tool_input.get("file_text", "")
+                        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                         with open(path, "w") as f:
                             f.write(new_content)
                         log_fn(task_id, "step", f"Created {path}")
+                        if visual_agent:
+                            self._open_path(path, log_fn, task_id)
                         return f"File created: {path}"
                     else:  # str_replace
                         old_str = tool_input.get("old_str", "")
@@ -283,6 +323,8 @@ class RealExecutor:
                         with open(path, "w") as f:
                             f.write(content)
                         log_fn(task_id, "step", f"Edited {path}")
+                        if visual_agent:
+                            self._open_path(path, log_fn, task_id)
                         return f"Replaced in {path}"
                 except Exception as e:
                     return f"Error editing {path}: {e}"
@@ -336,13 +378,28 @@ class RealExecutor:
 
         return f"Unknown tool: {tool_name}"
 
-    def run_raw(self, task_id: str, prompt: str, log_fn: LogFn, approval_fn: ApprovalFn, api_fn: Optional[ApiFn] = None) -> str:
-        system = (
-            "You are a local laptop agent. Execute the user's task step by step. "
-            "Use bash for shell commands, str_replace_based_edit_tool for file edits. "
-            "Log each step clearly. Do not take irreversible actions without approval. "
-            "NEVER use sudo or any command requiring elevated privileges. "
-            "NEVER use interactive commands that wait for input (apt install -y is fine, but never plain apt install). "
-            "Work only within the user's home directory unless told otherwise."
-        )
-        return self._run_agentic_loop(task_id, system, prompt, log_fn, approval_fn, api_fn=api_fn)
+    def run_raw(self, task_id: str, prompt: str, log_fn: LogFn, approval_fn: ApprovalFn, api_fn: Optional[ApiFn] = None, visual_agent: bool = False) -> str:
+        if visual_agent:
+            system = (
+                "You are a local laptop agent running in VISUAL mode. "
+                "The user can see your screen in real time, so make your actions visible. "
+                "When you create or edit a file, use the bash tool to run `open <path>` afterwards so it opens in the default app. "
+                "When you need to use an app (browser, terminal, Finder, editor, etc.), open it with `open -a 'AppName'` before interacting with it. "
+                "For example: open a folder with `open ~/Documents`, open a URL with `open https://...`, open a Python file with `open file.py`. "
+                "Prefer GUI actions that are visible to the user over silent background operations. "
+                "Use bash for shell commands and str_replace_based_edit_tool for file edits. "
+                "Log each step clearly. Do not take irreversible actions without approval. "
+                "NEVER use sudo or any command requiring elevated privileges. "
+                "NEVER use interactive commands that wait for input. "
+                "Work only within the user's home directory unless told otherwise."
+            )
+        else:
+            system = (
+                "You are a local laptop agent. Execute the user's task step by step. "
+                "Use bash for shell commands, str_replace_based_edit_tool for file edits. "
+                "Log each step clearly. Do not take irreversible actions without approval. "
+                "NEVER use sudo or any command requiring elevated privileges. "
+                "NEVER use interactive commands that wait for input (apt install -y is fine, but never plain apt install). "
+                "Work only within the user's home directory unless told otherwise."
+            )
+        return self._run_agentic_loop(task_id, system, prompt, log_fn, approval_fn, api_fn=api_fn, visual_agent=visual_agent)

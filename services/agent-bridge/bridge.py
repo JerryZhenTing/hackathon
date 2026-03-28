@@ -96,8 +96,9 @@ def run_task_in_thread(task: dict):
     task_type = task.get("type", "raw")
     params = task.get("params", {})
     user_prompt = task.get("userPrompt", "")
+    visual_agent = task.get("visualAgent", False)
 
-    log.info("Starting task %s (type=%s)", task_id, task_type)
+    log.info("Starting task %s (type=%s, visual=%s)", task_id, task_type, visual_agent)
 
     try:
         executor = get_executor()
@@ -134,6 +135,7 @@ def run_task_in_thread(task: dict):
                 log_fn=post_log,
                 approval_fn=request_approval,
                 api_fn=api,
+                visual_agent=visual_agent,
             )
             complete_task(task_id, result or "Task completed.")
 

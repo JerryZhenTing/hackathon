@@ -415,6 +415,7 @@ export default function Home() {
   const [freeText, setFreeText] = useState("");
   const [selectedAction, setSelectedAction] = useState<QuickAction | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [visualAgent, setVisualAgent] = useState(false);
 
   const activeTask = tasks.find((t) => t.id === activeTaskId) ?? null;
 
@@ -470,7 +471,8 @@ export default function Home() {
     async (
       prompt: string,
       type: TaskType = "raw",
-      params: Record<string, string> = {}
+      params: Record<string, string> = {},
+      visual?: boolean
     ) => {
       setSubmitting(true);
       setSelectedAction(null);
@@ -478,7 +480,7 @@ export default function Home() {
         const r = await fetch("/api/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ userPrompt: prompt, type, params }),
+          body: JSON.stringify({ userPrompt: prompt, type, params, visualAgent: visual ?? visualAgent }),
         });
         const task: Task = await r.json();
         setTasks((prev) => [task, ...prev]);
@@ -552,11 +554,41 @@ export default function Home() {
                 onChange={(e) => setFreeText(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                    if (freeText.trim()) submitTask(freeText.trim());
+                    if (freeText.trim()) submitTask(freeText.trim(), "raw", {}, visualAgent);
                   }
                 }}
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-600 focus:ring-1 focus:ring-sky-600/30 resize-none"
               />
+
+              {/* Visual agent toggle */}
+              <label className="flex items-center gap-2.5 cursor-pointer select-none group w-fit">
+                <div
+                  onClick={() => setVisualAgent((v) => !v)}
+                  className={`relative w-4 h-4 rounded border transition-colors flex-shrink-0 flex items-center justify-center ${
+                    visualAgent
+                      ? "bg-sky-600 border-sky-500"
+                      : "bg-zinc-800 border-zinc-600 group-hover:border-zinc-500"
+                  }`}
+                >
+                  {visualAgent && (
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                      <path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                  <input
+                    type="checkbox"
+                    checked={visualAgent}
+                    onChange={(e) => setVisualAgent(e.target.checked)}
+                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                  />
+                </div>
+                <span className="text-xs text-zinc-400 group-hover:text-zinc-300 transition-colors">
+                  Visual agent
+                </span>
+                <span className="text-xs text-zinc-600">
+                  — watch the agent work on your screen in real time
+                </span>
+              </label>
 
               {/* Quick action buttons */}
               <div className="flex flex-wrap gap-2">
@@ -572,7 +604,7 @@ export default function Home() {
               </div>
 
               <button
-                onClick={() => freeText.trim() && submitTask(freeText.trim())}
+                onClick={() => freeText.trim() && submitTask(freeText.trim(), "raw", {}, visualAgent)}
                 disabled={!freeText.trim() || submitting}
                 className="w-full py-2 text-sm font-semibold rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
               >
